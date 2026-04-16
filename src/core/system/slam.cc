@@ -35,6 +35,10 @@ bool SlamSystem::Init(const std::string& yaml_path) {
     options_.with_gridmap_ = yaml["system"]["with_g2p5"].as<bool>();
     options_.step_on_kf_ = yaml["system"]["step_on_kf"].as<bool>();
 
+    if (yaml["system"]["map_path"]) {
+        options_.map_path_ = yaml["system"]["map_path"].as<std::string>();
+    }
+
     if (options_.with_loop_closing_) {
         LOG(INFO) << "slam with loop closing";
         LoopClosing::Options options;
@@ -137,7 +141,8 @@ void SlamSystem::StartSLAM(std::string map_name) {
 void SlamSystem::SaveMap(const SaveMapService::Request::SharedPtr request,
                          SaveMapService::Response::SharedPtr response) {
     map_name_ = request->map_id;
-    std::string save_path = "./data/" + map_name_ + "/";
+    std::string base = options_.map_path_.empty() ? "./data/" : options_.map_path_;
+    std::string save_path = base + map_name_ + "/";
 
     SaveMap(save_path);
     response->response = 0;
@@ -146,7 +151,8 @@ void SlamSystem::SaveMap(const SaveMapService::Request::SharedPtr request,
 void SlamSystem::SaveMap(const std::string& path) {
     std::string save_path = path;
     if (save_path.empty()) {
-        save_path = "./data/" + map_name_ + "/";
+        std::string base = options_.map_path_.empty() ? "./data/" : options_.map_path_;
+        save_path = base + map_name_ + "/";
     }
 
     LOG(INFO) << "slam map saving to " << save_path;

@@ -47,6 +47,7 @@ class SlamSystem {
         bool with_2dvisualization_ = true;  // 是否需要2D可视化UI
 
         bool step_on_kf_ = true;  // 是否在关键帧处暂停p
+        std::string map_path_;    // 地图保存根路径，空则默认 ./data/
     };
 
     using SaveMapService = srv::SaveMap;

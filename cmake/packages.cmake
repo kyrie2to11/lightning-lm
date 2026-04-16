@@ -15,6 +15,7 @@ find_package(std_srvs REQUIRED)
 find_package(OpenCV REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(tf2_ros REQUIRED)
+find_package(tf2_eigen REQUIRED)
 find_package(rosbag2_cpp REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 
@@ -42,6 +43,7 @@ include_directories(
         ${Pangolin_INCLUDE_DIRS}
         ${GLEW_INCLUDE_DIRS}
         ${tf2_INCLUDE_DIRS}
+        ${tf2_eigen_INCLUDE_DIRS}
         ${pcl_conversions_INCLUDR_DIRS}
         ${rclcpp_INCLUDE_DIRS}
         ${rosbag2_cpp_INCLUDE_DIRS}

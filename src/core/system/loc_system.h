@@ -6,6 +6,8 @@
 #define LIGHTNING_LOC_SYSTEM_H
 
 #include <tf2_ros/transform_broadcaster.h>
+#include <tf2_ros/buffer.h>
+#include <tf2_ros/transform_listener.h>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/imu.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
@@ -58,6 +60,8 @@ class LocSystem {
     /// 实时模式下的ros2 node, subscribers
     rclcpp::Node::SharedPtr node_;
     std::shared_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_ = nullptr;
+    std::shared_ptr<tf2_ros::Buffer> tf_buffer_ = nullptr;
+    std::shared_ptr<tf2_ros::TransformListener> tf_listener_ = nullptr;
 
     std::string imu_topic_;
     std::string cloud_topic_;

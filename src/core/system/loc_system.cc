@@ -7,6 +7,11 @@
 #include "io/yaml_io.h"
 #include "wrapper/ros_utils.h"
 
+#include <tf2/exceptions.h>
+#include <tf2_ros/buffer.h>
+#include <tf2_ros/transform_listener.h>
+#include <tf2_eigen/tf2_eigen.hpp>
+
 namespace lightning {
 
 LocSystem::LocSystem(LocSystem::Options options) : options_(options) {
@@ -59,8 +64,42 @@ bool LocSystem::Init(const std::string &yaml_path) {
 
     if (options_.pub_tf_) {
         tf_broadcaster_ = std::make_shared<tf2_ros::TransformBroadcaster>(node_);
+        tf_buffer_ = std::make_shared<tf2_ros::Buffer>(node_->get_clock());
+        tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
         loc_->SetTFCallback(
-            [this](const geometry_msgs::msg::TransformStamped &pose) { tf_broadcaster_->sendTransform(pose); });
+            [this](const geometry_msgs::msg::TransformStamped &loc_tf) {
+                // loc_tf is map -> base_footprint from localization
+                // We need to compute map -> odom by subtracting odom -> base_footprint
+                geometry_msgs::msg::TransformStamped map_to_odom;
+                map_to_odom.header.frame_id = "map";
+                map_to_odom.header.stamp = loc_tf.header.stamp;
+                map_to_odom.child_frame_id = "odom";
+
+                try {
+                    auto odom_to_base = tf_buffer_->lookupTransform(
+                        "odom", "base_footprint", loc_tf.header.stamp,
+                        rclcpp::Duration::from_seconds(0.1));
+
+                    // T_map_odom = T_map_base * T_base_odom
+                    // T_map_odom = T_map_base * inv(T_odom_base)
+                    Eigen::Isometry3d T_map_base = tf2::transformToEigen(loc_tf.transform);
+                    Eigen::Isometry3d T_odom_base = tf2::transformToEigen(odom_to_base.transform);
+                    Eigen::Isometry3d T_map_odom = T_map_base * T_odom_base.inverse();
+
+                    map_to_odom.transform = tf2::eigenToTransform(T_map_odom).transform;
+                } catch (const tf2::TransformException &ex) {
+                    // Fallback: if odom not available, publish map -> base_footprint directly
+                    LOG(WARNING) << "TF lookup failed: " << ex.what() << ", publishing map->odom as identity";
+                    map_to_odom.transform.translation.x = 0;
+                    map_to_odom.transform.translation.y = 0;
+                    map_to_odom.transform.translation.z = 0;
+                    map_to_odom.transform.rotation.w = 1;
+                    map_to_odom.transform.rotation.x = 0;
+                    map_to_odom.transform.rotation.y = 0;
+                    map_to_odom.transform.rotation.z = 0;
+                }
+                tf_broadcaster_->sendTransform(map_to_odom);
+            });
     }
 
     bool ret = loc_->Init(yaml_path, map_path);
