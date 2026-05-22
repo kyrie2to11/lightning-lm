@@ -5,21 +5,21 @@
 common:
   dataset: "custom"
   lidar_topic: "/polka/merged_cloud"
-  livox_lidar_topic: "/livox/lidar"  # unused
+  livox_lidar_topic: "/livox/lidar" # unused
   imu_topic: "/imu/rear_top"
 
 # fasterlio 参数
 fasterlio:
-  lidar_type: 2                # RoboSense Airy 兼容 Velodyne 模式
-  scan_line: 96                # RoboSense Airy 96 线
-  blind: 0.1                   # 盲区 0.1m
-  time_scale: 1.0              # Gazebo 时间戳已是秒级，无需缩放
+  lidar_type: 4 # RoboSense Airy
+  scan_line: 96 # RoboSense Airy 96 线
+  blind: 0.1 # 盲区 0.1m, 小于盲区距离的不会处理
+  time_scale: 1.0 # 兼容不同数据集的时间单位，仅对Velodyne LiDAR(lidar_type=2)生效
 
-  skip_lidar_num: 0            # 不跳帧
-  point_filter_num: 4          # 点云采样
-  max_iteration: 4             # 最大迭代次数
-  filter_size_scan: 0.5        # scan 降采样
-  filter_size_map: 0.5         # map 降采样
+  skip_lidar_num: 0 # 不跳帧
+  point_filter_num: 6 # 点云采样
+  max_iteration: 4 # 最大迭代次数
+  filter_size_scan: 0.5 # scan 降采样
+  filter_size_map: 0.5 # map 降采样
 
   ivox_grid_resolution: 0.5
   ivox_nearby_type: 18
@@ -37,18 +37,16 @@ fasterlio:
   #   base_footprint -> rear_link:       (0, 0, 0.2325)
   #   rear_link -> rear_top_lidar_link:  (-0.483, 0, 0.120), rpy=(0, -30deg, 0)
   #   Combined: T=(-0.483, 0, 0.353), R=Ry(-30deg)
-  extrinsic_T: [ -0.483, 0, 0.353 ]
-  extrinsic_R: [ 0.866, 0, -0.5,
-                 0, 1, 0,
-                 0.5, 0, 0.866 ]
+  extrinsic_T: [-0.483, 0, 0.353]
+  extrinsic_R: [0.866, 0, -0.5, 0, 1, 0, 0.5, 0, 0.866]
   keep_first_imu_estimation: false
   kf_dis_th: 1.0
-  kf_angle_th: 10.0
+  kf_angle_th: 2.0
 
-  enable_icp_part: false
+  enable_icp_part: true
   plane_icp_weight: 300.0
-  min_pts: 500
-  imu_filter: false
+  min_pts: 300
+  imu_filter: true
   proj_kfs: false
 
 g2p5:
@@ -57,21 +55,21 @@ g2p5:
   floor_height: -1.2
   min_th_floor: 0.50
   max_th_floor: 1.0
-  grid_map_resolution: 0.05   # 匹配 Nav2 的 0.05m 分辨率
+  grid_map_resolution: 0.05 # 匹配 Nav2 的 0.05m 分辨率
 
 system:
   with_loop_closing: true
-  with_ui: true               # 启用 Pangolin 3D UI
-  with_2dui: false
-  with_g2p5: true             # 输出 2D 栅格地图
-  step_on_kf: false
+  with_ui: true # 启用 Pangolin 3D UI
+  with_2dui: true
+  with_g2p5: true # 输出 2D 栅格地图
+  step_on_kf: true
 
   enable_lidar_loc_skip: false
   enable_lidar_loc_rviz: false
   enable_lidar_odom_skip: false
   evaluation: false
   lidar_loc_skip_num: 4
-  lidar_odom_skip_num: 2
+  lidar_odom_skip_num: 0
   map_path: src/robot_navigation/maps/
   pub_tf: true
 
@@ -80,8 +78,8 @@ loop_closing:
   min_id_interval: 20
   closest_id_th: 50
   max_range: 30.0
-  ndt_score_th: 1.3
-  with_height: true           # 平面场景，约束高度防 Z 轴漂移
+  ndt_score_th: 1.0
+  with_height: true # 平面场景，约束高度防 Z 轴漂移
 
 lidar_loc:
   enable_dynamic_polygon: false
@@ -92,12 +90,12 @@ lidar_loc:
   filter_z_max: 30.0
   filter_z_min: -1.0
   force_2d: false
-  grid_search_angle_range: 180.0
-  grid_search_angle_step: 60
+  grid_search_angle_range: 90.0
+  grid_search_angle_step: 10
   lidar_loc_odom_th: 0.5
   init_with_fp: true
-  min_init_confidence: 1.8
-  update_dynamic_cloud: false
+  min_init_confidence: 0.8
+  update_dynamic_cloud: true
   update_err_h: 0.2
   update_err_v: 0.2
   update_kf_dis: 2.0
@@ -137,12 +135,12 @@ pgo:
 
 roi:
   height_max: 10.0
-  height_min: 0.5
-  range_max: 30.0             # 匹配 LiDAR max_range
+  height_min: -10.0
+  range_max: 30.0 # 匹配 LiDAR max_range
   range_min: 0.5
 
 ui:
-  car_length: 3.5             # 绞接车辆长度
+  car_length: 3.5 # 绞接车辆长度
   car_width: 1.8
-  car_height: 2.0
+  car_height: 1.2
   scans: 1
