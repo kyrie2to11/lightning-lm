@@ -1,16 +1,15 @@
-# 针对绞接车辆 rookie_articulated 的配置
-# LiDAR: Polka 6-LiDAR 融合点云 (/polka/merged_cloud, frame: base_footprint)
-# IMU: rear_top 内置 IMU (/imu/rear_top, frame: rear_top_lidar_link)
+# 当前双 Airy 铰接试验车在线建图配置。
+# Polka 输出已经完成动态 TF、多雷达时间对齐和逐点去畸变。
 
 common:
   dataset: "custom"
   lidar_topic: "/polka/merged_cloud"
   livox_lidar_topic: "/livox/lidar" # unused
-  imu_topic: "/imu/rear_top"
+  imu_topic: "/imu/airy_rear"
 
 # fasterlio 参数
 fasterlio:
-  lidar_type: 4 # RoboSense Airy
+  lidar_type: 5 # POLKA_MERGED: pre-fused, pre-deskewed XYZI PointCloud2
   scan_line: 96 # RoboSense Airy 96 线
   blind: 0.1 # 盲区 0.1m, 小于盲区距离的不会处理
   time_scale: 1.0 # 兼容不同数据集的时间单位，仅对Velodyne LiDAR(lidar_type=2)生效
@@ -32,13 +31,10 @@ fasterlio:
   b_acc_cov: 0.0001
   b_gyr_cov: 0.0001
   extrinsic_est_en: false
-  # Extrinsic: rear_top IMU (rear_top_lidar_link) -> base_footprint (merged cloud frame)
-  # URDF chain: base_footprint -> rear_link -> rear_top_lidar_link
-  #   base_footprint -> rear_link:       (0, 0, 0.2325)
-  #   rear_link -> rear_top_lidar_link:  (-0.483, 0, 0.120), rpy=(0, -30deg, 0)
-  #   Combined: T=(-0.483, 0, 0.353), R=Ry(-30deg)
-  extrinsic_T: [-0.483, 0, 0.353]
-  extrinsic_R: [0.866, 0, -0.5, 0, 1, 0, 0.5, 0, 0.866]
+  # Transform virtual LiDAR frame base_footprint -> rear Airy IMU coordinates.
+  # Derived from the current real URDF; update rotation after final LiDAR calibration.
+  extrinsic_T: [0.6365, 0.0, -0.3557]
+  extrinsic_R: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
   keep_first_imu_estimation: false
   kf_dis_th: 1.0
   kf_angle_th: 2.0
@@ -62,7 +58,7 @@ system:
   with_ui: true # 启用 Pangolin 3D UI
   with_2dui: true
   with_g2p5: true # 输出 2D 栅格地图
-  step_on_kf: true
+  step_on_kf: false
 
   enable_lidar_loc_skip: false
   enable_lidar_loc_rviz: false
@@ -70,7 +66,7 @@ system:
   evaluation: false
   lidar_loc_skip_num: 4
   lidar_odom_skip_num: 0
-  map_path: src/robot_navigation/maps/
+  map_path: "" # run_real_slam_mapping.sh supplies an absolute path
   pub_tf: true
 
 loop_closing:

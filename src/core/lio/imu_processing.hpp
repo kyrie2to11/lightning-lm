@@ -36,7 +36,7 @@ class ImuProcess {
     void SetGyrBiasCov(const Vec3d &b_g);
     void SetAccBiasCov(const Vec3d &b_a);
 
-    void Process(const MeasureGroup &meas, ESKF &kf_state, CloudPtr &scan);
+    void Process(const MeasureGroup &meas, ESKF &kf_state, CloudPtr &scan, bool deskew_points = true);
 
     bool IsIMUInited() const { return imu_need_init_ == false; }
     void SetUseIMUFilter(bool b) { use_imu_filter_ = b; }
@@ -53,7 +53,7 @@ class ImuProcess {
 
    private:
     void IMUInit(const MeasureGroup &meas, ESKF &kf_state, int &N);
-    void UndistortPcl(const MeasureGroup &meas, ESKF &kf_state, CloudPtr &pcl_out);
+    void UndistortPcl(const MeasureGroup &meas, ESKF &kf_state, CloudPtr &pcl_out, bool deskew_points);
 
     static inline constexpr int max_init_count_ = 20;
 
@@ -171,7 +171,8 @@ inline void ImuProcess::IMUInit(const MeasureGroup &meas, ESKF &kf_state, int &N
     last_imu_ = meas.imu_.back();
 }
 
-inline void ImuProcess::UndistortPcl(const MeasureGroup &meas, ESKF &kf_state, CloudPtr &pcl_out) {
+inline void ImuProcess::UndistortPcl(const MeasureGroup &meas, ESKF &kf_state, CloudPtr &pcl_out,
+                                     bool deskew_points) {
     /*** add the imu_ of the last frame-tail to the of current frame-head ***/
     auto v_imu = meas.imu_;
     v_imu.push_front(last_imu_);
@@ -259,6 +260,11 @@ inline void ImuProcess::UndistortPcl(const MeasureGroup &meas, ESKF &kf_state, C
     last_imu_ = meas.imu_.back();
     last_lidar_end_time_ = pcl_end_time;
 
+    if (!deskew_points) {
+        pcl_out = meas.scan_;
+        return;
+    }
+
     /*** sort point clouds by offset time ***/
     pcl_out = meas.scan_;
     std::sort(pcl_out->points.begin(), pcl_out->points.end(),
@@ -312,7 +318,7 @@ inline void ImuProcess::UndistortPcl(const MeasureGroup &meas, ESKF &kf_state, C
     }
 }
 
-inline void ImuProcess::Process(const MeasureGroup &meas, ESKF &kf_state, CloudPtr &scan) {
+inline void ImuProcess::Process(const MeasureGroup &meas, ESKF &kf_state, CloudPtr &scan, bool deskew_points) {
     if (meas.imu_.empty()) {
         return;
     }
@@ -353,7 +359,7 @@ inline void ImuProcess::Process(const MeasureGroup &meas, ESKF &kf_state, CloudP
         return;
     }
 
-    Timer::Evaluate([&, this]() { UndistortPcl(meas, kf_state, scan); }, "Undistort Pcl");
+    Timer::Evaluate([&, this]() { UndistortPcl(meas, kf_state, scan, deskew_points); }, "Undistort Pcl");
 }
 }  // namespace lightning
 

@@ -1,5 +1,7 @@
 #include "pointcloud_preprocess.h"
+#include <algorithm>
 #include <execution>
+#include <stdexcept>
 
 #include <glog/logging.h>
 
@@ -23,6 +25,10 @@ void PointCloudPreprocess::Process(const sensor_msgs::msg::PointCloud2 ::SharedP
 
         case LidarType::ROBOSENSE:
             RoboSenseHandler(msg);
+            break;
+
+        case LidarType::POLKA_MERGED:
+            PolkaMergedHandler(msg);
             break;
 
         default:
@@ -135,6 +141,15 @@ void PointCloudPreprocess::RoboSenseHandler(const sensor_msgs::msg::PointCloud2:
     cloud_out_.clear();
     cloud_full_.clear();
 
+    const auto timestamp = std::find_if(msg->fields.begin(), msg->fields.end(), [](const auto &field) {
+        return field.name == "timestamp";
+    });
+    if (timestamp == msg->fields.end() || timestamp->datatype != sensor_msgs::msg::PointField::FLOAT64 ||
+        timestamp->count != 1) {
+        throw std::invalid_argument(
+            "RoboSense PointCloud2 requires one FLOAT64 'timestamp' field containing absolute Linux seconds");
+    }
+
     pcl::PointCloud<PointRobotSense> pl_orig;
     pcl::fromROSMsg(*msg, pl_orig);
 
@@ -175,6 +190,39 @@ void PointCloudPreprocess::RoboSenseHandler(const sensor_msgs::msg::PointCloud2:
     cloud_out_.width = cloud_out_.size();
     cloud_out_.height = 1;
     cloud_out_.is_dense = false;
+}
+
+void PointCloudPreprocess::PolkaMergedHandler(const sensor_msgs::msg::PointCloud2::SharedPtr &msg) {
+    cloud_out_.clear();
+    cloud_full_.clear();
+
+    if (msg->header.frame_id != "base_footprint") {
+        throw std::invalid_argument("Polka merged PointCloud2 frame must be 'base_footprint'");
+    }
+
+    pcl::PointCloud<pcl::PointXYZI> input;
+    pcl::fromROSMsg(*msg, input);
+    cloud_out_.reserve(input.size());
+    for (std::size_t i = 0; i < input.size(); ++i) {
+        if (i % static_cast<std::size_t>(point_filter_num_) != 0) {
+            continue;
+        }
+        const auto &source = input[i];
+        const double range = source.x * source.x + source.y * source.y + source.z * source.z;
+        if (range < blind_ * blind_ || source.z < height_min_ || source.z > height_max_) {
+            continue;
+        }
+        PointType point;
+        point.x = source.x;
+        point.y = source.y;
+        point.z = source.z;
+        point.intensity = source.intensity;
+        point.time = 0.0;
+        cloud_out_.push_back(point);
+    }
+    cloud_out_.width = cloud_out_.size();
+    cloud_out_.height = 1;
+    cloud_out_.is_dense = input.is_dense;
 }
 
 void PointCloudPreprocess::VelodyneHandler(const sensor_msgs::msg::PointCloud2::SharedPtr &msg) {

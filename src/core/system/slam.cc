@@ -35,7 +35,7 @@ bool SlamSystem::Init(const std::string& yaml_path) {
     options_.with_gridmap_ = yaml["system"]["with_g2p5"].as<bool>();
     options_.step_on_kf_ = yaml["system"]["step_on_kf"].as<bool>();
 
-    if (yaml["system"]["map_path"]) {
+    if (options_.map_path_.empty() && yaml["system"]["map_path"]) {
         options_.map_path_ = yaml["system"]["map_path"].as<std::string>();
     }
 

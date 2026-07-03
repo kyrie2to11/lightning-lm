@@ -78,4 +78,15 @@ target_link_libraries(${PROJECT_NAME}.libs
 install(TARGETS ${PROJECT_NAME}.libs miao.core miao.utils
         DESTINATION lib)
 
+if(BUILD_TESTING)
+    find_package(ament_cmake_gtest REQUIRED)
+    ament_add_gtest(test_pointcloud_preprocess
+            ${PROJECT_SOURCE_DIR}/test/test_pointcloud_preprocess.cc)
+    target_link_libraries(test_pointcloud_preprocess
+            ${PROJECT_NAME}.libs
+            ${third_party_libs})
+    target_compile_definitions(test_pointcloud_preprocess PRIVATE
+            LIGHTNING_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
+endif()
+
 add_subdirectory(app)

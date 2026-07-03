@@ -11,6 +11,7 @@
 #include "wrapper/ros_utils.h"
 
 DEFINE_string(config, "./config/default.yaml", "配置文件");
+DEFINE_string(map_path, "", "地图保存根目录；非空时覆盖配置文件中的 system.map_path");
 
 /// 运行一个LIO前端，带可视化
 int main(int argc, char** argv) {
@@ -26,6 +27,7 @@ int main(int argc, char** argv) {
 
     SlamSystem::Options options;
     options.online_mode_ = true;
+    options.map_path_ = FLAGS_map_path;
 
     SlamSystem slam(options);
     if (!slam.Init(FLAGS_config)) {

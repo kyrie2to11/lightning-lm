@@ -115,6 +115,9 @@ class LaserMapping {
      */
     CloudPtr GetGlobalMap(bool use_lio_pose, bool use_voxel = true, float res = 0.1);
 
+    static double ComputeLidarEndTime(double begin_time, const PointCloudType &cloud, double mean_scan_time,
+                                      bool input_is_predeskewed);
+
    private:
     // sync lidar with imu
     bool SyncPackages();

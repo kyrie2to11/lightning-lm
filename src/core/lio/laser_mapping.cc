@@ -102,6 +102,9 @@ bool LaserMapping::LoadParamsFromYAML(const std::string &yaml_file) {
     } else if (lidar_type == 4) {
         preprocess_->SetLidarType(LidarType::ROBOSENSE);
         LOG(INFO) << "Using RoboSense Lidar";
+    } else if (lidar_type == 5) {
+        preprocess_->SetLidarType(LidarType::POLKA_MERGED);
+        LOG(INFO) << "Using pre-deskewed Polka merged cloud";
     } else {
         LOG(WARNING) << "unknown lidar_type";
         return false;
@@ -173,7 +176,7 @@ bool LaserMapping::Run() {
     }
 
     /// IMU process, kf prediction, undistortion
-    p_imu_->Process(measures_, kf_, scan_undistort_);
+    p_imu_->Process(measures_, kf_, scan_undistort_, !preprocess_->InputIsPredeskewed());
 
     if (scan_undistort_->empty() || (scan_undistort_ == nullptr)) {
         LOG(WARNING) << "No point, skip this scan!";
@@ -476,6 +479,17 @@ void LaserMapping::ProcessPointCloud2(CloudPtr cloud) {
         "Preprocess (Standard)");
 }
 
+double LaserMapping::ComputeLidarEndTime(double begin_time, const PointCloudType &cloud, double mean_scan_time,
+                                         bool input_is_predeskewed) {
+    if (input_is_predeskewed) {
+        return begin_time;
+    }
+    if (cloud.size() <= 1 || cloud.points.back().time / 1000.0 < 0.5 * mean_scan_time) {
+        return begin_time + mean_scan_time;
+    }
+    return begin_time + cloud.points.back().time / 1000.0;
+}
+
 bool LaserMapping::SyncPackages() {
     if (lidar_buffer_.empty() || imu_buffer_.empty()) {
         LOG(INFO) << "lidar or imu is empty";
@@ -487,15 +501,16 @@ bool LaserMapping::SyncPackages() {
         measures_.scan_ = lidar_buffer_.front();
         measures_.lidar_begin_time_ = time_buffer_.front();
 
-        if (measures_.scan_->points.size() <= 1) {
+        lidar_end_time_ = ComputeLidarEndTime(measures_.lidar_begin_time_, *measures_.scan_, lidar_mean_scantime_,
+                                              preprocess_->InputIsPredeskewed());
+
+        if (preprocess_->InputIsPredeskewed()) {
+            // Polka has already transformed every point to the header timestamp.
+        } else if (measures_.scan_->points.size() <= 1) {
             LOG(WARNING) << "Too few input point cloud!";
-            lidar_end_time_ = measures_.lidar_begin_time_ + lidar_mean_scantime_;
         } else if (measures_.scan_->points.back().time / double(1000) < 0.5 * lidar_mean_scantime_) {
-            lidar_end_time_ = measures_.lidar_begin_time_ + lidar_mean_scantime_;
         } else {
             scan_num_++;
-            lidar_end_time_ = measures_.lidar_begin_time_ + measures_.scan_->points.back().time / double(1000);
-
             lidar_mean_scantime_ +=
                 (measures_.scan_->points.back().time / double(1000) - lidar_mean_scantime_) / scan_num_;
 
