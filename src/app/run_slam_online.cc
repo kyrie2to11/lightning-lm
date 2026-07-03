@@ -18,9 +18,18 @@ int main(int argc, char** argv) {
     google::InitGoogleLogging(argv[0]);
     FLAGS_colorlogtostderr = true;
     FLAGS_stderrthreshold = google::INFO;
-    google::ParseCommandLineFlags(&argc, &argv, true);
 
     using namespace lightning;
+
+    auto non_ros_args = NonRosArguments(argc, argv);
+    std::vector<char*> gflags_argv;
+    gflags_argv.reserve(non_ros_args.size());
+    for (auto& arg : non_ros_args) {
+        gflags_argv.push_back(arg.data());
+    }
+    int gflags_argc = static_cast<int>(gflags_argv.size());
+    char** gflags_argv_data = gflags_argv.data();
+    google::ParseCommandLineFlags(&gflags_argc, &gflags_argv_data, true);
 
     /// 需要rclcpp::init
     rclcpp::init(argc, argv);

@@ -12,6 +12,7 @@
 
 #include "core/lio/pointcloud_preprocess.h"
 #include "core/lio/laser_mapping.h"
+#include "wrapper/ros_utils.h"
 
 namespace lightning {
 namespace {
@@ -127,6 +128,13 @@ TEST(ArticulatedVehicleConfig, UsesPolkaAndRearAiryImu) {
     EXPECT_EQ(yaml["fasterlio"]["extrinsic_R"].as<std::vector<double>>(),
               (std::vector<double>{1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0}));
     EXPECT_FALSE(yaml["system"]["step_on_kf"].as<bool>());
+}
+
+TEST(CommandLine, RemovesRosArgumentsBeforeGflagsParsing) {
+    const char *argv[] = {"run_slam_online", "--config=/tmp/test.yaml", "--ros-args", "-r",
+                          "__node:=lightning_slam"};
+    const auto args = NonRosArguments(5, argv);
+    EXPECT_EQ(args, (std::vector<std::string>{"run_slam_online", "--config=/tmp/test.yaml"}));
 }
 
 }  // namespace
