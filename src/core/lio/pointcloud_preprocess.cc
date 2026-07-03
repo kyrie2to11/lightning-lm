@@ -199,6 +199,16 @@ void PointCloudPreprocess::PolkaMergedHandler(const sensor_msgs::msg::PointCloud
     if (msg->header.frame_id != "base_footprint") {
         throw std::invalid_argument("Polka merged PointCloud2 frame must be 'base_footprint'");
     }
+    for (const char *name : {"x", "y", "z", "intensity"}) {
+        const auto field = std::find_if(msg->fields.begin(), msg->fields.end(), [name](const auto &candidate) {
+            return candidate.name == name;
+        });
+        if (field == msg->fields.end() || field->datatype != sensor_msgs::msg::PointField::FLOAT32 ||
+            field->count != 1) {
+            throw std::invalid_argument(std::string("Polka merged PointCloud2 requires one FLOAT32 '") + name +
+                                        "' field");
+        }
+    }
 
     pcl::PointCloud<pcl::PointXYZI> input;
     pcl::fromROSMsg(*msg, input);

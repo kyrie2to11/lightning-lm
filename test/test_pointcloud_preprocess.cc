@@ -102,6 +102,15 @@ TEST(PointCloudPreprocess, AcceptsPredeskewedPolkaXyzi) {
     EXPECT_TRUE(preprocess.InputIsPredeskewed());
 }
 
+TEST(PointCloudPreprocess, RejectsPolkaCloudWithoutFloat32Intensity) {
+    auto msg = MakeXyziCloud("base_footprint");
+    msg->fields.pop_back();
+    PointCloudPreprocess preprocess;
+    preprocess.SetLidarType(LidarType::POLKA_MERGED);
+    PointCloudType::Ptr output(new PointCloudType);
+    EXPECT_THROW(preprocess.Process(msg, output), std::invalid_argument);
+}
+
 TEST(LaserMappingTiming, PredeskewedSnapshotEndsAtHeaderTime) {
     PointCloudType cloud;
     cloud.push_back(PointType{});
