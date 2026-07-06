@@ -141,8 +141,9 @@ void SlamSystem::StartSLAM(std::string map_name) {
 void SlamSystem::SaveMap(const SaveMapService::Request::SharedPtr request,
                          SaveMapService::Response::SharedPtr response) {
     map_name_ = request->map_id;
-    std::string base = options_.map_path_.empty() ? "./data/" : options_.map_path_;
-    std::string save_path = base + map_name_ + "/";
+    const std::filesystem::path base = options_.map_path_.empty() ? std::filesystem::path("./data/")
+                                                                   : std::filesystem::path(options_.map_path_);
+    const std::string save_path = (base / map_name_).string();
 
     SaveMap(save_path);
     response->response = 0;
@@ -151,8 +152,9 @@ void SlamSystem::SaveMap(const SaveMapService::Request::SharedPtr request,
 void SlamSystem::SaveMap(const std::string& path) {
     std::string save_path = path;
     if (save_path.empty()) {
-        std::string base = options_.map_path_.empty() ? "./data/" : options_.map_path_;
-        save_path = base + map_name_ + "/";
+        const std::filesystem::path base = options_.map_path_.empty() ? std::filesystem::path("./data/")
+                                                                       : std::filesystem::path(options_.map_path_);
+        save_path = (base / map_name_).string();
     }
 
     LOG(INFO) << "slam map saving to " << save_path;
