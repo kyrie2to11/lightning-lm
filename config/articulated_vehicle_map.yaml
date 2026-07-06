@@ -66,7 +66,7 @@ system:
   evaluation: false
   lidar_loc_skip_num: 4
   lidar_odom_skip_num: 0
-  map_path: "" # run_real_slam_mapping.sh supplies an absolute path
+  map_path: src/robot_navigation/maps/ # default save root inside the workspace
   pub_tf: true
 
 loop_closing:

@@ -123,6 +123,7 @@ TEST(ArticulatedVehicleConfig, UsesPolkaAndRearAiryImu) {
     EXPECT_EQ(yaml["common"]["lidar_topic"].as<std::string>(), "/polka/merged_cloud");
     EXPECT_EQ(yaml["common"]["imu_topic"].as<std::string>(), "/imu/airy_rear");
     EXPECT_EQ(yaml["fasterlio"]["lidar_type"].as<int>(), 5);
+    EXPECT_EQ(yaml["system"]["map_path"].as<std::string>(), "src/robot_navigation/maps/");
     EXPECT_EQ(yaml["fasterlio"]["extrinsic_T"].as<std::vector<double>>(),
               (std::vector<double>{0.6365, 0.0, -0.3557}));
     EXPECT_EQ(yaml["fasterlio"]["extrinsic_R"].as<std::vector<double>>(),
