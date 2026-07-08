@@ -1,19 +1,19 @@
 # 针对绞接车辆 rookie_articulated 的定位配置
-# LiDAR: Polka 6-LiDAR 融合点云 (/polka/merged_cloud, frame: base_footprint)
-# IMU: rear_top 内置 IMU (/imu/rear_top, frame: rear_top_lidar_link)
+# LiDAR: Polka 3-LiDAR 融合点云 (/polka/merged_cloud, frame: base_footprint)
+# IMU: rear Airy 内置 IMU (/imu/airy_rear, frame: rear_lidar_link)
 
 common:
   dataset: "custom"
   lidar_topic: "/polka/merged_cloud"
   livox_lidar_topic: "/livox/lidar"  # unused
-  imu_topic: "/imu/rear_top"
+  imu_topic: "/imu/airy_rear"
 
 # fasterlio 参数
 fasterlio:
-  lidar_type: 2                # RoboSense Airy 兼容 Velodyne 模式
-  scan_line: 96                # RoboSense Airy 96 线
+  lidar_type: 5 # POLKA_MERGED: pre-fused, pre-deskewed XYZI PointCloud2
+  scan_line: 96 # RoboSense Airy 96 线
   blind: 0.1                   # 盲区 0.1m
-  time_scale: 1.0              # Gazebo 时间戳已是秒级，无需缩放
+  time_scale: 1.0 # 兼容不同数据集的时间单位，仅对 Velodyne LiDAR(lidar_type=2)生效
 
   skip_lidar_num: 0            # 不跳帧
   point_filter_num: 4          # 点云采样
@@ -32,11 +32,17 @@ fasterlio:
   b_acc_cov: 0.0001
   b_gyr_cov: 0.0001
   extrinsic_est_en: false
-  # Extrinsic: rear_top IMU (rear_top_lidar_link) -> base_footprint (merged cloud frame)
-  extrinsic_T: [ -0.483, 0, 0.353 ]
-  extrinsic_R: [ 0.866, 0, -0.5,
-                 0, 1, 0,
-                 0.5, 0, 0.866 ]
+  # Extrinsic（lightning 约定：p_IMU = extrinsic_R * p_Lidar + extrinsic_T，
+  # 即把点云坐标从 LiDAR 帧映射到 IMU 帧）。
+  #   LiDAR 帧 = base_footprint（Polka 融合点云帧）
+  #   IMU  帧 = rear_lidar_link（/imu/airy_rear 的 frame_id，后雷达内置 IMU）
+  # 数值 = 实测 TF base_footprint->rear_lidar_link 的逆
+  #   （该 TF：平移 [-0.6365,0,0.4110]，R=[[0,0,-1],[0,-1,0],[-1,0,0]]，与种子 URDF 一致）。
+  # 与 articulated_vehicle_map.yaml 一致（同物理安装）；后雷达安装位姿变更后重算。
+  extrinsic_T: [0.4110, 0.0, -0.6365]
+  extrinsic_R: [0.0, 0.0, -1.0,
+                0.0, -1.0, 0.0,
+                -1.0, 0.0, 0.0]
   keep_first_imu_estimation: false
   kf_dis_th: 1.0
   kf_angle_th: 10.0
