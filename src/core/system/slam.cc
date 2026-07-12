@@ -10,6 +10,8 @@
 #include "ui/pangolin_window.h"
 #include "wrapper/ros_utils.h"
 
+#include <tf2/exceptions.h>
+#include <tf2_eigen/tf2_eigen.hpp>
 #include <yaml-cpp/yaml.h>
 #include <filesystem>
 #include <opencv2/opencv.hpp>
@@ -92,6 +94,10 @@ bool SlamSystem::Init(const std::string& yaml_path) {
         cloud_topic_ = yaml["common"]["lidar_topic"].as<std::string>();
         livox_topic_ = yaml["common"]["livox_lidar_topic"].as<std::string>();
 
+        if (!ConfigureExtrinsicFromTf(yaml)) {
+            return false;
+        }
+
         rclcpp::QoS qos(10);
         // qos.best_effort();
 
@@ -122,6 +128,43 @@ bool SlamSystem::Init(const std::string& yaml_path) {
                                          SaveMapService::Response::SharedPtr res) { SaveMap(req, res); });
 
         LOG(INFO) << "online slam node has been created.";
+    }
+
+    return true;
+}
+
+bool SlamSystem::ConfigureExtrinsicFromTf(const YAML::Node& yaml) {
+    const auto fasterlio = yaml["fasterlio"];
+    const bool extrinsic_from_tf =
+        fasterlio["extrinsic_from_tf"] && fasterlio["extrinsic_from_tf"].as<bool>();
+    if (!extrinsic_from_tf) {
+        return true;
+    }
+
+    const std::string lidar_frame_id =
+        fasterlio["lidar_frame_id"] ? fasterlio["lidar_frame_id"].as<std::string>() : "";
+    const std::string imu_frame_id =
+        fasterlio["imu_frame_id"] ? fasterlio["imu_frame_id"].as<std::string>() : "";
+    if (lidar_frame_id.empty() || imu_frame_id.empty()) {
+        LOG(ERROR) << "fasterlio.extrinsic_from_tf requires lidar_frame_id and imu_frame_id";
+        return false;
+    }
+
+    tf_buffer_ = std::make_shared<tf2_ros::Buffer>(node_->get_clock());
+    tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_, node_, true);
+
+    try {
+        const auto transform = tf_buffer_->lookupTransform(
+            imu_frame_id, lidar_frame_id, tf2::TimePointZero, tf2::durationFromSec(5.0));
+        const Eigen::Isometry3d T_imu_lidar = tf2::transformToEigen(transform.transform);
+        lio_->SetExtrinsic(T_imu_lidar.translation(), T_imu_lidar.rotation());
+
+        LOG(INFO) << "Loaded fasterlio extrinsic from TF: " << imu_frame_id << " <- "
+                  << lidar_frame_id << ", t=" << T_imu_lidar.translation().transpose();
+    } catch (const tf2::TransformException& ex) {
+        LOG(ERROR) << "Failed to lookup fasterlio extrinsic TF " << imu_frame_id << " <- "
+                   << lidar_frame_id << ": " << ex.what();
+        return false;
     }
 
     return true;

@@ -9,6 +9,9 @@
 #include <sensor_msgs/msg/imu.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <string>
+#include <tf2_ros/buffer.h>
+#include <tf2_ros/transform_listener.h>
+#include <yaml-cpp/yaml.h>
 
 #include "lightning/srv/save_map.hpp"
 #include "livox_ros_driver2/msg/custom_msg.hpp"
@@ -78,6 +81,7 @@ class SlamSystem {
    private:
     /// ros端保存地图的实现
     void SaveMap(const SaveMapService::Request::SharedPtr request, SaveMapService::Response::SharedPtr response);
+    bool ConfigureExtrinsicFromTf(const YAML::Node& yaml);
 
     Options options_;
     std::atomic_bool running_ = false;
@@ -95,6 +99,8 @@ class SlamSystem {
 
     /// 实时模式下的ros2 node, subscribers
     rclcpp::Node::SharedPtr node_;
+    std::shared_ptr<tf2_ros::Buffer> tf_buffer_ = nullptr;
+    std::shared_ptr<tf2_ros::TransformListener> tf_listener_ = nullptr;
     std::string imu_topic_;
     std::string cloud_topic_;
     std::string livox_topic_;

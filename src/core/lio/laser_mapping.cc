@@ -35,6 +35,18 @@ bool LaserMapping::Init(const std::string &config_yaml) {
     return true;
 }
 
+void LaserMapping::SetExtrinsic(const Vec3d &translation, const Mat3d &rotation) {
+    offset_t_lidar_fixed_ = translation;
+    offset_R_lidar_fixed_ = rotation;
+
+    extrinT_ = {translation.x(), translation.y(), translation.z()};
+    extrinR_ = {rotation(0, 0), rotation(0, 1), rotation(0, 2),
+                rotation(1, 0), rotation(1, 1), rotation(1, 2),
+                rotation(2, 0), rotation(2, 1), rotation(2, 2)};
+
+    p_imu_->SetExtrinsic(offset_t_lidar_fixed_, offset_R_lidar_fixed_);
+}
+
 bool LaserMapping::LoadParamsFromYAML(const std::string &yaml_file) {
     // get params from yaml
     int lidar_type, ivox_nearby_type;

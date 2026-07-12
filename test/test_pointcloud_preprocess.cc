@@ -123,12 +123,28 @@ TEST(ArticulatedVehicleConfig, UsesPolkaAndRearAiryImu) {
     EXPECT_EQ(yaml["common"]["lidar_topic"].as<std::string>(), "/polka/merged_cloud");
     EXPECT_EQ(yaml["common"]["imu_topic"].as<std::string>(), "/imu/airy_rear");
     EXPECT_EQ(yaml["fasterlio"]["lidar_type"].as<int>(), 5);
+    EXPECT_TRUE(yaml["fasterlio"]["extrinsic_from_tf"].as<bool>());
+    EXPECT_EQ(yaml["fasterlio"]["lidar_frame_id"].as<std::string>(), "base_footprint");
+    EXPECT_EQ(yaml["fasterlio"]["imu_frame_id"].as<std::string>(), "rear_lidar_imu_ned");
     EXPECT_EQ(yaml["system"]["map_path"].as<std::string>(), "src/robot_navigation/maps/");
     EXPECT_EQ(yaml["fasterlio"]["extrinsic_T"].as<std::vector<double>>(),
-              (std::vector<double>{0.6365, 0.0, -0.3557}));
+              (std::vector<double>{-0.000744, 0.640484, -0.415733}));
     EXPECT_EQ(yaml["fasterlio"]["extrinsic_R"].as<std::vector<double>>(),
-              (std::vector<double>{1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0}));
+              (std::vector<double>{-0.000992, 0.999963, -0.008486,
+                                   0.000420, 0.008487, 0.999964,
+                                   0.999999, 0.000988, -0.000429}));
     EXPECT_FALSE(yaml["system"]["step_on_kf"].as<bool>());
+}
+
+TEST(LaserMappingExtrinsic, CanOverrideManualExtrinsic) {
+    LaserMapping mapping;
+    Vec3d translation(1.0, 2.0, 3.0);
+    Mat3d rotation = Eigen::AngleAxisd(M_PI / 2.0, Vec3d::UnitZ()).toRotationMatrix();
+
+    mapping.SetExtrinsic(translation, rotation);
+
+    EXPECT_TRUE(mapping.GetExtrinsicTranslation().isApprox(translation));
+    EXPECT_TRUE(mapping.GetExtrinsicRotation().isApprox(rotation));
 }
 
 TEST(CommandLine, RemovesRosArgumentsBeforeGflagsParsing) {
