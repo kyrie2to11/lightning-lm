@@ -88,6 +88,12 @@ if(BUILD_TESTING)
             ${third_party_libs})
     target_compile_definitions(test_pointcloud_preprocess PRIVATE
             LIGHTNING_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
+
+    ament_add_gtest(test_imu_initialization
+            ${PROJECT_SOURCE_DIR}/test/test_imu_initialization.cc)
+    target_link_libraries(test_imu_initialization
+            ${PROJECT_NAME}.libs
+            ${third_party_libs})
 endif()
 
 add_subdirectory(app)

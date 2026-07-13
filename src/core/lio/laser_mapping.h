@@ -84,6 +84,7 @@ class LaserMapping {
     void SetUI(std::shared_ptr<ui::PangolinWindow> ui) { ui_ = ui; }
 
     void SetExtrinsic(const Vec3d &translation, const Mat3d &rotation);
+    void SetInitialWorldImuRotation(const Mat3d &R_world_imu);
     const Vec3d &GetExtrinsicTranslation() const { return offset_t_lidar_fixed_; }
     const Mat3d &GetExtrinsicRotation() const { return offset_R_lidar_fixed_; }
 

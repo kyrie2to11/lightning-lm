@@ -161,6 +161,25 @@ bool SlamSystem::ConfigureExtrinsicFromTf(const YAML::Node& yaml) {
 
         LOG(INFO) << "Loaded fasterlio extrinsic from TF: " << imu_frame_id << " <- "
                   << lidar_frame_id << ", t=" << T_imu_lidar.translation().transpose();
+
+        const bool init_world_from_tf =
+            fasterlio["init_world_from_tf"] && fasterlio["init_world_from_tf"].as<bool>();
+        if (init_world_from_tf) {
+            const std::string world_frame_id =
+                fasterlio["world_frame_id"] ? fasterlio["world_frame_id"].as<std::string>() : "";
+            if (world_frame_id.empty()) {
+                LOG(ERROR) << "fasterlio.init_world_from_tf requires world_frame_id";
+                return false;
+            }
+
+            const auto world_transform = tf_buffer_->lookupTransform(
+                world_frame_id, imu_frame_id, tf2::TimePointZero, tf2::durationFromSec(5.0));
+            const Eigen::Isometry3d T_world_imu = tf2::transformToEigen(world_transform.transform);
+            lio_->SetInitialWorldImuRotation(T_world_imu.rotation());
+
+            LOG(INFO) << "Loaded fasterlio initial world pose from TF: " << world_frame_id << " <- "
+                      << imu_frame_id;
+        }
     } catch (const tf2::TransformException& ex) {
         LOG(ERROR) << "Failed to lookup fasterlio extrinsic TF " << imu_frame_id << " <- "
                    << lidar_frame_id << ": " << ex.what();
