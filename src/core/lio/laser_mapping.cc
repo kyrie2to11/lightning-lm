@@ -1239,8 +1239,10 @@ void LaserMapping::ProcessNonLeaderBodies(const NavState& leader_seed, double se
         DeskewSeedState seed;
         seed.rot = leader_seed.rot_.matrix() * R_cross_seed;
         seed.pos = leader_seed.pos_ + leader_seed.rot_.matrix() * t_cross_seed;
-        // Velocity lever-arm correction
-        Vec3d omega_world = leader_seed.rot_.matrix() * nl.processor.getMeanGyr();
+        // Velocity lever-arm correction: use leader's angular velocity
+        // (leader and non-leader are rigidly connected through the joint;
+        //  omega_leader × lever_arm gives the velocity difference)
+        Vec3d omega_world = leader_seed.rot_.matrix() * p_imu_->GetAngvelLast();
         Vec3d lever = seed.pos - leader_seed.pos_;
         seed.vel = leader_seed.vel_ + omega_world.cross(lever);
         seed.bg = nl.processor.getMeanGyr();

@@ -188,8 +188,8 @@ class NonLeaderImuProcessor {
             const auto& head = v_imu[i];
             const auto& tail = v_imu[i + 1];
 
-            // Skip intervals entirely before beg_time
-            if (tail->timestamp < beg_time) {
+            // Skip intervals entirely before seed_time
+            if (tail->timestamp < seed_time) {
                 prev_t = tail->timestamp;
                 continue;
             }
@@ -198,10 +198,10 @@ class NonLeaderImuProcessor {
             Vec3d acc_avr = 0.5 * (head->linear_acceleration + tail->linear_acceleration);
             acc_avr *= acc_scale_;
 
-            // Compute dt: use the effective start of this interval
+            // Compute dt: clamp interval start to seed_time
             double interval_start = head->timestamp;
             if (first) {
-                interval_start = std::max(head->timestamp, beg_time);
+                interval_start = std::max(head->timestamp, seed_time);
                 first = false;
             }
             double dt = tail->timestamp - interval_start;
@@ -217,8 +217,9 @@ class NonLeaderImuProcessor {
             vel += acc_world * dt;
             rot = rot * math::exp(angvel_corrected, dt).matrix();
 
+            // Record pose with offset relative to scan begin (for deskew time matching)
             double offs_t = tail->timestamp - beg_time;
-            Vec3d acc_s = rot * acc_avr + grav;  // world-frame acc for pose record
+            Vec3d acc_s = rot * acc_avr + grav;
             imu_poses_.emplace_back(offs_t, acc_s, angvel_corrected, vel, pos, rot);
 
             prev_t = tail->timestamp;
