@@ -48,6 +48,7 @@ class PointCloudPreprocess {
         height_max_ = height_max;
         height_min_ = height_min;
     }
+    void SetExpectedFrame(const std::string &frame) { expected_frame_ = frame; }
 
    private:
     void Oust64Handler(const sensor_msgs::msg::PointCloud2 ::SharedPtr &msg);
@@ -66,6 +67,8 @@ class PointCloudPreprocess {
 
     float height_max_ = 1.0;
     float height_min_ = -1.0;
+
+    std::string expected_frame_ = "base_footprint";
 };
 }  // namespace lightning
 

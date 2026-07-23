@@ -166,12 +166,17 @@ inline void ImuProcess::IMUInit(const MeasureGroup &meas, ESKF &kf_state, int &N
     init_state.timestamp_ = meas.imu_.back()->timestamp;
     if (use_initial_world_imu_rotation_) {
         init_state.rot_ = SO3(initial_R_world_imu_);
-        init_state.grav_ = Vec3d(0.0, 0.0, -G_m_s2);
+        init_state.grav_ = -(init_state.rot_.matrix() * mean_acc_ / mean_acc_.norm()) * G_m_s2;
     } else {
         init_state.grav_ = -mean_acc_ / mean_acc_.norm() * G_m_s2;
     }
     init_state.bg_ = mean_gyr_;
     kf_state.ChangeX(init_state);
+
+    LOG(INFO) << "[DBG init] mean_acc=" << mean_acc_.transpose() << " |mean|=" << mean_acc_.norm()
+              << " use_initial_world_imu_rotation_=" << use_initial_world_imu_rotation_;
+    LOG(INFO) << "[DBG init] rot_(body->world, 实际赋值)=\n" << init_state.rot_.matrix();
+    LOG(INFO) << "[DBG init] grav_=" << init_state.grav_.transpose();
 
     auto init_P = kf_state.GetP();
     init_P.setIdentity();
@@ -198,6 +203,20 @@ inline void ImuProcess::UndistortPcl(const MeasureGroup &meas, ESKF &kf_state, C
     auto imu_state = kf_state.GetX();
     imu_pose_.clear();
     imu_pose_.emplace_back(0.0, acc_s_last_, angvel_last_, imu_state.vel_, imu_state.pos_, imu_state.rot_.matrix());
+
+    // 调试：帧起始 pitchY
+    {
+        const Mat3d &R0 = imu_state.rot_.matrix();
+        double pitchY0 = asin(std::clamp(-R0(2, 0), -1.0, 1.0)) * 180.0 / M_PI;
+        Vec3d gyro0 = Vec3d::Zero(), acc0 = Vec3d::Zero();
+        if (v_imu.size() > 1) {
+            gyro0 = 0.5 * (v_imu[0]->angular_velocity + v_imu[1]->angular_velocity);
+            acc0 = 0.5 * (v_imu[0]->linear_acceleration + v_imu[1]->linear_acceleration);
+        }
+        LOG(INFO) << "[DBG deskew] frame-start pitchY=" << pitchY0
+                  << " gyro=[" << gyro0.transpose() << "] acc=[" << acc0.transpose() << "]"
+                  << " bg=[" << imu_state.bg_.transpose() << "]";
+    }
 
     /*** forward propagation at each imu_ point ***/
     Vec3d angvel_avr, acc_avr, acc_imu, vel_imu, pos_imu;
@@ -272,6 +291,15 @@ inline void ImuProcess::UndistortPcl(const MeasureGroup &meas, ESKF &kf_state, C
     imu_state = kf_state.GetX();
     last_imu_ = meas.imu_.back();
     last_lidar_end_time_ = pcl_end_time;
+
+    // 调试：帧结束 pitchY（IMU 前向传播后，观测更新前）
+    {
+        const Mat3d &R1 = imu_state.rot_.matrix();
+        double pitchY1 = asin(std::clamp(-R1(2, 0), -1.0, 1.0)) * 180.0 / M_PI;
+        LOG(INFO) << "[DBG deskew] frame-end pitchY=" << pitchY1
+                  << " vel=[" << imu_state.vel_.transpose() << "]"
+                  << " pos=[" << imu_state.pos_.transpose() << "]";
+    }
 
     if (!deskew_points) {
         pcl_out = meas.scan_;

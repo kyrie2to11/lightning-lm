@@ -14,6 +14,8 @@
 #include <tf2_eigen/tf2_eigen.hpp>
 #include <yaml-cpp/yaml.h>
 #include <filesystem>
+#include <chrono>
+#include <thread>
 #include <opencv2/opencv.hpp>
 
 namespace lightning {
@@ -153,14 +155,31 @@ bool SlamSystem::ConfigureExtrinsicFromTf(const YAML::Node& yaml) {
     tf_buffer_ = std::make_shared<tf2_ros::Buffer>(node_->get_clock());
     tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_, node_, true);
 
+    // lookupTransform 的 duration 超时只在 frame 已存在但请求时刻 transform 未到时才等待；
+    // 对 “frame 尚未被接收” 会立刻抛 “does not exist”。离线回放时 /tf_static 是一次性 latched，
+    // 可能晚于本函数到达，故先轮询 canTransform 等 frame 出现再做 lookup。
+    auto wait_for_transform = [&](const std::string& target, const std::string& source,
+                                  double timeout_sec) -> bool {
+        for (int i = 0; i < static_cast<int>(timeout_sec * 10.0); ++i) {
+            if (tf_buffer_->canTransform(target, source, tf2::TimePointZero)) return true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        return tf_buffer_->canTransform(target, source, tf2::TimePointZero);
+    };
+
     try {
+        if (!wait_for_transform(imu_frame_id, lidar_frame_id, 5.0)) {
+            LOG(ERROR) << "Timed out waiting for TF " << imu_frame_id << " <- " << lidar_frame_id;
+            return false;
+        }
         const auto transform = tf_buffer_->lookupTransform(
-            imu_frame_id, lidar_frame_id, tf2::TimePointZero, tf2::durationFromSec(5.0));
+            imu_frame_id, lidar_frame_id, tf2::TimePointZero, tf2::durationFromSec(0.5));
         const Eigen::Isometry3d T_imu_lidar = tf2::transformToEigen(transform.transform);
         lio_->SetExtrinsic(T_imu_lidar.translation(), T_imu_lidar.rotation());
 
         LOG(INFO) << "Loaded fasterlio extrinsic from TF: " << imu_frame_id << " <- "
-                  << lidar_frame_id << ", t=" << T_imu_lidar.translation().transpose();
+                  << lidar_frame_id << ", t=" << T_imu_lidar.translation().transpose()
+                  << ", R=\n" << T_imu_lidar.rotation().matrix();
 
         const bool init_world_from_tf =
             fasterlio["init_world_from_tf"] && fasterlio["init_world_from_tf"].as<bool>();
@@ -172,8 +191,12 @@ bool SlamSystem::ConfigureExtrinsicFromTf(const YAML::Node& yaml) {
                 return false;
             }
 
+            if (!wait_for_transform(world_frame_id, imu_frame_id, 5.0)) {
+                LOG(ERROR) << "Timed out waiting for TF " << world_frame_id << " <- " << imu_frame_id;
+                return false;
+            }
             const auto world_transform = tf_buffer_->lookupTransform(
-                world_frame_id, imu_frame_id, tf2::TimePointZero, tf2::durationFromSec(5.0));
+                world_frame_id, imu_frame_id, tf2::TimePointZero, tf2::durationFromSec(0.5));
             const Eigen::Isometry3d T_world_imu = tf2::transformToEigen(world_transform.transform);
             lio_->SetInitialWorldImuRotation(T_world_imu.rotation());
 

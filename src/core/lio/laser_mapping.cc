@@ -90,6 +90,10 @@ bool LaserMapping::LoadParamsFromYAML(const std::string &yaml_file) {
 
         preprocess_->SetHeightROI(height_max, height_min);
 
+        if (yaml["fasterlio"]["lidar_frame_id"]) {
+            preprocess_->SetExpectedFrame(yaml["fasterlio"]["lidar_frame_id"].as<std::string>());
+        }
+
         options_.kf_dis_th_ = yaml["fasterlio"]["kf_dis_th"].as<double>();
         options_.kf_angle_th_ = yaml["fasterlio"]["kf_angle_th"].as<double>() * M_PI / 180.0;
         options_.enable_icp_part_ = yaml["fasterlio"]["enable_icp_part"].as<bool>();
@@ -341,8 +345,12 @@ bool LaserMapping::Run() {
         ui_->UpdateScan(scan_down_body_, state_point_.GetPose());
     }
 
-    LOG(INFO) << "LIO state: " << state_point_.pos_.transpose() << ", yaw "
-              << state_point_.rot_.angleZ<double>() * 180 / M_PI << ", vel: " << state_point_.vel_.transpose()
+    const Mat3d R_w_imu = state_point_.rot_.matrix();
+    LOG(INFO) << "LIO state: " << state_point_.pos_.transpose()
+              << ", yawZ " << state_point_.rot_.angleZ<double>() * 180 / M_PI
+              << ", pitchY " << asin(std::clamp(-R_w_imu(2, 0), -1.0, 1.0)) * 180 / M_PI
+              << ", rollX " << atan2(R_w_imu(2, 1), R_w_imu(2, 2)) * 180 / M_PI
+              << ", vel: " << state_point_.vel_.transpose()
               << ", grav: " << state_point_.grav_.transpose() << ", grav norm: " << state_point_.grav_.norm();
 
     return true;
@@ -357,7 +365,7 @@ void LaserMapping::ProjectKFs(CloudPtr cloud, int size_limit) {
         // LOG(INFO) << "projecting kf: " << kf->GetID();
         // if (last_kf_) {
         // auto kf = last_kf_;
-        SE3 pose = pose_cur * kf->GetLIOPose();
+        SE3 pose = pose_cur * kf->GetLIOPose() * SE3(offset_R_lidar_fixed_, offset_t_lidar_fixed_);
 
         int cnt = 0;
         for (auto &pt : kf->GetCloud()->points) {
@@ -853,10 +861,12 @@ CloudPtr LaserMapping::GetGlobalMap(bool use_lio_pose, bool use_voxel, float res
 
         CloudPtr cloud_trans(new PointCloudType);
 
+        // 点云在 lidar 系，需要 T_world_lidar = T_world_imu * T_imu_lidar
+        const SE3 T_imu_lidar(offset_R_lidar_fixed_, offset_t_lidar_fixed_);
         if (use_lio_pose) {
-            pcl::transformPointCloud(*cloud_filter, *cloud_trans, kf->GetLIOPose().matrix());
+            pcl::transformPointCloud(*cloud_filter, *cloud_trans, (kf->GetLIOPose() * T_imu_lidar).matrix());
         } else {
-            pcl::transformPointCloud(*cloud_filter, *cloud_trans, kf->GetOptPose().matrix());
+            pcl::transformPointCloud(*cloud_filter, *cloud_trans, (kf->GetOptPose() * T_imu_lidar).matrix());
         }
 
         *global_map += *cloud_trans;
