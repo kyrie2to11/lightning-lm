@@ -132,18 +132,9 @@ class NonLeaderImuProcessor {
         }
         if (bias_count_ >= target_count_) {
             bias_ready_ = true;
-            // Determine acc scale (same logic as leader ImuProcess)
-            double norm = mean_acc_.norm();
-            if (norm > 0.5 && norm < 1.5) {
-                acc_scale_ = 9.80665;
-            } else if (norm > 7.0 && norm < 12.0) {
-                acc_scale_ = 1.0;
-            } else {
-                acc_scale_ = 1.0;
-            }
             LOG(INFO) << "[non-leader] bias ready: mean_gyr=" << mean_gyr_.transpose()
                       << " mean_acc=" << mean_acc_.transpose()
-                      << " |acc|=" << norm << " acc_scale=" << acc_scale_;
+                      << " |acc|=" << mean_acc_.norm();
         }
         return bias_ready_;
     }
@@ -177,9 +168,14 @@ class NonLeaderImuProcessor {
         const Vec3d& bg = seed.bg;
         const Vec3d& grav = seed.grav;
 
+        // Acc normalization: scale raw acc to m/s² using mean_acc norm
+        // (colleague's approach: continuous G / ||mean_acc||)
+        const double acc_norm = mean_acc_.norm();
+        const double acc_scale = (acc_norm > 1e-6) ? (G_m_s2 / acc_norm) : 1.0;
+
         imu_poses_.clear();
-        // Record the initial pose (offset = 0)
-        imu_poses_.emplace_back(0.0, Vec3d::Zero(), Vec3d::Zero(), vel, pos, rot);
+        // Record the initial pose using carried-over acc/angvel from previous frame
+        imu_poses_.emplace_back(0.0, acc_s_last_, angvel_last_, vel, pos, rot);
 
         double prev_t = seed_time;
         bool first = true;
@@ -196,7 +192,7 @@ class NonLeaderImuProcessor {
 
             Vec3d angvel_avr = 0.5 * (head->angular_velocity + tail->angular_velocity);
             Vec3d acc_avr = 0.5 * (head->linear_acceleration + tail->linear_acceleration);
-            acc_avr *= acc_scale_;
+            acc_avr *= acc_scale;
 
             // Compute dt: clamp interval start to seed_time
             double interval_start = head->timestamp;
@@ -219,30 +215,35 @@ class NonLeaderImuProcessor {
 
             // Record pose with offset relative to scan begin (for deskew time matching)
             double offs_t = tail->timestamp - beg_time;
-            Vec3d acc_s = rot * acc_avr + grav;
-            imu_poses_.emplace_back(offs_t, acc_s, angvel_corrected, vel, pos, rot);
+            imu_poses_.emplace_back(offs_t, acc_world, angvel_corrected, vel, pos, rot);
+
+            // Update carried-over state for next frame's initial pose
+            acc_s_last_ = acc_world;
+            angvel_last_ = angvel_corrected;
 
             prev_t = tail->timestamp;
-            last_imu_ = tail;
         }
 
-        // Final predict to end_time if needed
+        // Final predict to end_time if needed (extrapolate using last sample)
         if (prev_t < end_time && !v_imu.empty()) {
             double dt = end_time - prev_t;
             if (dt > 0 && dt < 0.1) {
                 const auto& tail = v_imu.back();
                 Vec3d angvel_corrected = tail->angular_velocity - bg;
-                Vec3d acc_avr = tail->linear_acceleration * acc_scale_;
+                Vec3d acc_avr = tail->linear_acceleration * acc_scale;
                 Vec3d acc_world = rot * acc_avr + grav;
                 pos += vel * dt + 0.5 * acc_world * dt * dt;
                 vel += acc_world * dt;
                 rot = rot * math::exp(angvel_corrected, dt).matrix();
+                acc_s_last_ = acc_world;
+                angvel_last_ = angvel_corrected;
             }
         }
 
         final_rot_ = rot;
         final_pos_ = pos;
-        angvel_last_ = seed.bg;  // approximate — not used critically
+        // Use absolute last IMU sample for cross-frame continuity
+        if (!imus.empty()) last_imu_ = imus.back();
     }
 
     /// Deskew a point cloud using the internally computed imu_poses_.
@@ -308,14 +309,16 @@ class NonLeaderImuProcessor {
     Vec3d mean_acc_ = Vec3d::Zero();
     int bias_count_ = 0;
     bool bias_ready_ = false;
-    static constexpr int target_count_ = 20;
-    double acc_scale_ = 1.0;
+    static constexpr int target_count_ = 200;  // ~1s at 200Hz (colleague's BIAS_INIT_TARGET_)
+
+    // Carried-over state for cross-frame continuity
+    Vec3d acc_s_last_ = Vec3d::Zero();      // world-frame acc at last IMU sample
+    Vec3d angvel_last_ = Vec3d::Zero();     // bias-corrected angvel at last IMU sample
 
     // Output from pureForwardPropagation
     std::vector<Pose6D> imu_poses_;
     Mat3d final_rot_ = Mat3d::Identity();
     Vec3d final_pos_ = Vec3d::Zero();
-    Vec3d angvel_last_ = Vec3d::Zero();
 
     IMUPtr last_imu_ = nullptr;
 };
