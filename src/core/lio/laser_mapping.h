@@ -5,6 +5,7 @@
 #include <condition_variable>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <thread>
+#include <tf2_ros/buffer.h>
 
 #include "common/eigen_types.h"
 #include "common/imu.h"
@@ -13,6 +14,7 @@
 #include "core/ivox3d/ivox3d.h"
 #include "core/lio/eskf.hpp"
 #include "core/lio/imu_processing.hpp"
+#include "core/lio/multibody.h"
 #include "pointcloud_preprocess.h"
 
 #include "livox_ros_driver2/msg/custom_msg.hpp"
@@ -76,6 +78,12 @@ class LaserMapping {
     /// 如果已经做了预处理，也可以直接处理点云
     void ProcessPointCloud2(CloudPtr cloud);
 
+    /// 多体模式：处理指定 lidar_id 的点云
+    void ProcessPointCloud2(const sensor_msgs::msg::PointCloud2::SharedPtr &msg, int lidar_id);
+
+    /// 多体模式：处理指定 imu_id 的 IMU
+    void ProcessIMU(const lightning::IMUPtr &msg_in, int imu_id);
+
     void ProcessIMU(const lightning::IMUPtr &msg_in);
 
     /// 保存前端的地图
@@ -85,6 +93,14 @@ class LaserMapping {
 
     void SetExtrinsic(const Vec3d &translation, const Mat3d &rotation);
     void SetInitialWorldImuRotation(const Mat3d &R_world_imu);
+
+    /// 多体配置（在 Init 之后、Run 之前由 SlamSystem 调用）
+    void SetMultiBodyConfig(const MultiBodyConfig &cfg) {
+        multibody_cfg_ = cfg;
+        const auto* leader_lc = cfg.findLeaderLidar();
+        if (leader_lc) leader_lidar_id_ = leader_lc->id;
+    }
+    void SetTfBuffer(std::shared_ptr<tf2_ros::Buffer> buf) { tf_buffer_ = buf; }
     const Vec3d &GetExtrinsicTranslation() const { return offset_t_lidar_fixed_; }
     const Mat3d &GetExtrinsicRotation() const { return offset_R_lidar_fixed_; }
 
@@ -126,6 +142,9 @@ class LaserMapping {
    private:
     // sync lidar with imu
     bool SyncPackages();
+    
+    // multi-body sync (multiple lidars + per-body IMUs)
+    bool SyncPackagesMultiBody();
 
     void ObsModel(NavState &s, ESKF::CustomObservationModel &obs);
 
@@ -141,6 +160,9 @@ class LaserMapping {
     }
 
     void MapIncremental();
+
+    /// 多体模式：非 leader body 去畸变 + 跨 body 变换 + 合并
+    void ProcessNonLeaderBodies(const NavState& leader_seed, double seed_time);
 
     bool LoadParamsFromYAML(const std::string &yaml);
 
@@ -233,6 +255,34 @@ class LaserMapping {
     std::list<Keyframe::Ptr> proj_kfs_;  // 投影到当前帧的关键帧
 
     std::shared_ptr<ui::PangolinWindow> ui_ = nullptr;
+
+    // ---- multi-body members ----
+    MultiBodyConfig multibody_cfg_;
+    std::shared_ptr<tf2_ros::Buffer> tf_buffer_ = nullptr;
+
+    // Per-lidar buffers (lidar_id → deque)
+    std::map<int, std::deque<LidarEntry>> mb_lidar_buffers_;
+    // Per-body IMU buffers (imu_id → deque)
+    std::map<int, std::deque<lightning::IMUPtr>> mb_imu_buffers_;
+    // Per-lidar last timestamp (for loopback detection)
+    std::map<int, double> mb_last_lidar_time_;
+    // Per-IMU last timestamp
+    std::map<int, double> mb_last_imu_time_;
+
+    // Non-leader body state (body_id → state)
+    std::vector<NonLeaderBodyState> nonleader_states_;
+    // Leader lidar id
+    int leader_lidar_id_ = -1;
+
+    // Synced multi-body measurement
+    MultiMeasureGroup mb_measures_;
+    // Previous scan end time (seed_time for non-leader deskew)
+    double prev_lidar_end_time_ = 0;
+    // Flag: at least one non-leader body has completed bias init
+    bool mb_nonleader_bias_done_ = false;
+
+    // Merged cloud after multi-body deskew + cross-body alignment
+    CloudPtr mb_merged_cloud_{new PointCloudType()};
 };
 
 }  // namespace lightning
