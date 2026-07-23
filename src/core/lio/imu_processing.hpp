@@ -48,6 +48,7 @@ class ImuProcess {
     }
 
     double GetMeanAccNorm() const { return mean_acc_.norm(); }
+    Vec3d GetAngvelLast() const { return angvel_last_; }
 
     Eigen::Matrix<double, 12, 12> Q_;
     Vec3d cov_acc_;
