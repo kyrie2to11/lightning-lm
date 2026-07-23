@@ -246,7 +246,10 @@ class NonLeaderImuProcessor {
     }
 
     /// Deskew a point cloud using the internally computed imu_poses_.
-    /// Output points are in the non-leader IMU frame at scan-end time.
+    /// Output points are in the non-leader LiDAR frame at scan-end time
+    /// (lightning convention: deskew wraps with R_L_I^T × (… − t_L_I) to
+    /// transform back from IMU frame to LiDAR frame, matching the leader's
+    /// UndistortPcl output convention).
     ///
     /// @param cloud     In/out point cloud (points in LiDAR frame, per-point .time in ms offset)
     /// @param beg_time  Scan begin time (for reference)

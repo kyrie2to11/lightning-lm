@@ -1264,14 +1264,34 @@ void LaserMapping::ProcessNonLeaderBodies(const NavState& leader_seed, double se
             // Update extrinsics for this specific lidar (may differ within same body)
             nl.processor.setExtrinsic(lc->R_lidar_imu, lc->t_lidar_imu);
 
-            // Copy + deskew
+            // Copy + deskew (output: non-leader LiDAR frame at scan-end)
             CloudPtr cloud_deskew = std::make_shared<PointCloudType>(*lc_it->second.cloud);
             nl.processor.undistortLidar(cloud_deskew, lc_it->second.begin_time, lc_it->second.end_time);
 
-            // Cross-body alignment: non-leader IMU → leader IMU (at scan-end time)
+            // Cross-body alignment at scan-end: non-leader LiDAR → leader LiDAR.
+            // The deskew outputs points in the non-leader LiDAR frame (lightning
+            // convention: R_L_I^T × (… − t_L_I) wrapping transforms back to LiDAR).
+            // So the cross-body transform must be T(leader_lidar ← nonleader_lidar),
+            // NOT T(leader_imu ← nonleader_imu) which the colleague uses (their
+            // deskew outputs IMU-frame points without the wrapping).
+            //
+            // Compute from IMU-to-IMU cross_end + extrinsics:
+            //   T(leader_lidar ← nl_lidar) = T(leader_lidar ← leader_imu)
+            //                               × T(leader_imu ← nl_imu)      [= cross_end]
+            //                               × T(nl_imu ← nl_lidar)
+            // T(leader_lidar ← leader_imu) = inverse of leader extrinsic
+            // T(nl_imu ← nl_lidar) = nl extrinsic
+            const Mat3d& R_L_I_leader = multibody_cfg_.findLeaderLidar()->R_lidar_imu;
+            const Vec3d& t_L_I_leader = multibody_cfg_.findLeaderLidar()->t_lidar_imu;
+            // R_leader_lidar_from_imu = R_L_I_leader^T (IMU→LiDAR)
+            // t_leader_lidar_from_imu = -R_L_I_leader^T × t_L_I_leader
+            Mat3d R_ldr_cross = R_L_I_leader.transpose() * R_cross_end * lc->R_lidar_imu;
+            Vec3d t_ldr_cross = R_L_I_leader.transpose() *
+                                (R_cross_end * lc->t_lidar_imu + t_cross_end - t_L_I_leader);
+
             for (auto& pt : cloud_deskew->points) {
                 Vec3d p(pt.x, pt.y, pt.z);
-                Vec3d p_aligned = R_cross_end * p + t_cross_end;
+                Vec3d p_aligned = R_ldr_cross * p + t_ldr_cross;
                 if (p_aligned.allFinite()) {
                     pt.x = p_aligned(0);
                     pt.y = p_aligned(1);
@@ -1279,7 +1299,7 @@ void LaserMapping::ProcessNonLeaderBodies(const NavState& leader_seed, double se
                 }
             }
 
-            // Merge into leader scan_undistort_
+            // Merge into leader scan_undistort_ (in leader LiDAR frame)
             *scan_undistort_ += *cloud_deskew;
             LOG(INFO) << "[non-leader] body=" << nl.body_id << " lidar=" << lidar_id
                       << " merged " << cloud_deskew->size() << " pts";
