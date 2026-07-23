@@ -1,6 +1,7 @@
 #include <pcl/common/transforms.h>
 #include <yaml-cpp/yaml.h>
 #include <fstream>
+#include <tf2_eigen/tf2_eigen.hpp>
 
 #include "common/options.h"
 #include "core/lightning_math.hpp"
@@ -176,8 +177,6 @@ void LaserMapping::ProcessIMU(const lightning::IMUPtr &imu) {
         /// 更新最新imu状态
         kf_imu_.Predict(timestamp - last_timestamp_imu_, p_imu_->Q_, imu->angular_velocity, imu->linear_acceleration);
 
-        // LOG(INFO) << "newest wrt lidar: " << timestamp - kf_.GetX().timestamp_;
-
         /// 更新ui
         if (ui_) {
             ui_->UpdateNavState(kf_imu_.GetX());
@@ -189,10 +188,113 @@ void LaserMapping::ProcessIMU(const lightning::IMUPtr &imu) {
     imu_buffer_.emplace_back(imu);
 }
 
+void LaserMapping::ProcessIMU(const lightning::IMUPtr &imu, int imu_id) {
+    UL lock(mtx_buffer_);
+
+    double timestamp = imu->timestamp;
+    if (timestamp < mb_last_imu_time_[imu_id]) {
+        LOG(WARNING) << "mb imu " << imu_id << " out-of-order — accepting";
+    }
+    mb_last_imu_time_[imu_id] = timestamp;
+    mb_imu_buffers_[imu_id].emplace_back(imu);
+    // Sort by timestamp to handle MCAP out-of-order delivery
+    std::sort(mb_imu_buffers_[imu_id].begin(),
+              mb_imu_buffers_[imu_id].end(),
+              [](const IMUPtr& a, const IMUPtr& b) { return a->timestamp < b->timestamp; });
+
+    // For the leader IMU, also mirror into the legacy path (kf_imu_ predict)
+    const auto* imu_cfg = multibody_cfg_.findImuByBody(multibody_cfg_.leader_body_id);
+    if (imu_cfg && imu_id == imu_cfg->id) {
+        if (p_imu_->IsIMUInited()) {
+            kf_imu_.Predict(timestamp - last_timestamp_imu_, p_imu_->Q_,
+                            imu->angular_velocity, imu->linear_acceleration);
+            if (ui_) ui_->UpdateNavState(kf_imu_.GetX());
+        }
+        last_timestamp_imu_ = timestamp;
+    }
+}
+
+void LaserMapping::ProcessPointCloud2(const sensor_msgs::msg::PointCloud2::SharedPtr &msg, int lidar_id) {
+    UL lock(mtx_buffer_);
+    Timer::Evaluate(
+        [&, this]() {
+            double timestamp = ToSec(msg->header.stamp);
+            if (timestamp < mb_last_lidar_time_[lidar_id]) {
+                LOG(WARNING) << "mb lidar " << lidar_id << " out-of-order, dt: "
+                             << timestamp - mb_last_lidar_time_[lidar_id] << " — accepting and sorting buffer";
+            }
+
+            LOG(INFO) << "get cloud lidar=" << lidar_id << " at " << std::setprecision(14) << timestamp;
+
+            CloudPtr cloud(new PointCloudType());
+            preprocess_->Process(msg, cloud);
+
+            LidarEntry entry;
+            entry.cloud = cloud;
+            entry.begin_time = timestamp;
+            entry.end_time = ComputeLidarEndTime(timestamp, *cloud, lidar_mean_scantime_,
+                                                  preprocess_->InputIsPredeskewed());
+            mb_lidar_buffers_[lidar_id].push_back(entry);
+            // Sort by begin_time to handle MCAP out-of-order delivery
+            std::sort(mb_lidar_buffers_[lidar_id].begin(),
+                      mb_lidar_buffers_[lidar_id].end(),
+                      [](const LidarEntry& a, const LidarEntry& b) { return a.begin_time < b.begin_time; });
+            mb_last_lidar_time_[lidar_id] = timestamp;
+        },
+        "Preprocess (MultiBody)");
+}
+
 bool LaserMapping::Run() {
-    if (!SyncPackages()) {
-        LOG(WARNING) << "sync package failed";
-        return false;
+    // ---- Sync ----
+    NavState leader_seed_state;
+    double seed_time = 0;
+
+    if (multibody_cfg_.enabled) {
+        if (!SyncPackagesMultiBody()) {
+            return false;
+        }
+
+        // Populate measures_ from mb_measures_ for the leader body
+        const auto* leader_lc = multibody_cfg_.findLeaderLidar();
+        if (!leader_lc) {
+            LOG(ERROR) << "no leader lidar configured";
+            return false;
+        }
+        leader_lidar_id_ = leader_lc->id;
+
+        auto lit = mb_measures_.lidars.find(leader_lidar_id_);
+        if (lit == mb_measures_.lidars.end()) {
+            LOG(ERROR) << "leader lidar not in synced measures";
+            return false;
+        }
+
+        measures_.scan_ = lit->second.cloud;
+        measures_.lidar_begin_time_ = mb_measures_.lidar_begin_time;
+        measures_.lidar_end_time_ = mb_measures_.lidar_end_time;
+        lidar_end_time_ = measures_.lidar_end_time_;
+
+        // Leader IMU window
+        const auto* leader_imu_cfg = multibody_cfg_.findImuByBody(multibody_cfg_.leader_body_id);
+        if (!leader_imu_cfg) {
+            LOG(ERROR) << "no leader IMU configured";
+            return false;
+        }
+        auto iit = mb_measures_.imus.find(leader_imu_cfg->id);
+        if (iit == mb_measures_.imus.end() || iit->second.empty()) {
+            LOG(INFO) << "leader IMU window empty, skipping";
+            return false;
+        }
+        measures_.imu_ = iit->second;
+
+        // Save leader state before Process for non-leader seeding
+        leader_seed_state = kf_.GetX();
+        seed_time = prev_lidar_end_time_;
+
+    } else {
+        if (!SyncPackages()) {
+            LOG(WARNING) << "sync package failed";
+            return false;
+        }
     }
 
     /// IMU process, kf prediction, undistortion
@@ -217,7 +319,13 @@ bool LaserMapping::Run() {
         first_lidar_time_ = measures_.lidar_end_time_;
         state_point_.timestamp_ = lidar_end_time_;
         flg_first_scan_ = false;
+        prev_lidar_end_time_ = measures_.lidar_end_time_;
         return true;
+    }
+
+    // ---- Multi-body: non-leader deskew + cross-body transform + merge ----
+    if (multibody_cfg_.enabled && p_imu_->IsIMUInited()) {
+        ProcessNonLeaderBodies(leader_seed_state, seed_time);
     }
 
     if (enable_skip_lidar_) {
@@ -353,6 +461,7 @@ bool LaserMapping::Run() {
               << ", vel: " << state_point_.vel_.transpose()
               << ", grav: " << state_point_.grav_.transpose() << ", grav norm: " << state_point_.grav_.norm();
 
+    prev_lidar_end_time_ = measures_.lidar_end_time_;
     return true;
 }
 
@@ -577,6 +686,132 @@ bool LaserMapping::SyncPackages() {
 
     // LOG(INFO) << "sync: " << std::setprecision(14) << measures_.lidar_begin_time_ << ", " <<
     // measures_.lidar_end_time_;
+
+    return true;
+}
+
+bool LaserMapping::SyncPackagesMultiBody() {
+    // Check all lidar buffers have data
+    for (const auto& lc : multibody_cfg_.lidars) {
+        auto it = mb_lidar_buffers_.find(lc.id);
+        if (it == mb_lidar_buffers_.end() || it->second.empty()) {
+            LOG(INFO) << "mb sync: lidar " << lc.id << " buffer empty";
+            return false;
+        }
+    }
+
+    // Take leader lidar front as reference
+    auto& leader_buf = mb_lidar_buffers_[leader_lidar_id_];
+    if (leader_buf.empty()) {
+        LOG(INFO) << "mb sync: leader lidar " << leader_lidar_id_ << " buffer empty";
+        return false;
+    }
+
+    const double ref_begin = leader_buf.front().begin_time;
+    const double ref_end = leader_buf.front().end_time;
+
+    // Update mean scantime (from leader cloud)
+    if (!preprocess_->InputIsPredeskewed() && leader_buf.front().cloud->size() > 1) {
+        double scan_dur = leader_buf.front().cloud->points.back().time / 1000.0;
+        if (scan_dur > 0.5 * lidar_mean_scantime_) {
+            scan_num_++;
+            lidar_mean_scantime_ += (scan_dur - lidar_mean_scantime_) / scan_num_;
+            lo::lidar_time_interval = lidar_mean_scantime_;
+        }
+    }
+
+    // For each non-leader lidar, find the entry closest to ref_begin
+    // Store selected begin_times (avoid iterator invalidation on pop)
+    std::map<int, double> selected_begin;
+    selected_begin[leader_lidar_id_] = ref_begin;
+
+    for (const auto& lc : multibody_cfg_.lidars) {
+        if (lc.id == leader_lidar_id_) continue;
+        auto& buf = mb_lidar_buffers_[lc.id];
+        // Find entry within tolerance of ref_begin (buffers are sorted by begin_time)
+        double best_dt = 1e9;
+        double best_begin = -1;
+        bool found = false;
+        for (const auto& entry : buf) {
+            double dt = std::abs(entry.begin_time - ref_begin);
+            if (dt < best_dt) {
+                best_dt = dt;
+                best_begin = entry.begin_time;
+                found = true;
+            }
+        }
+        if (!found || best_dt > multibody_cfg_.sync_tolerance) {
+            LOG(INFO) << "mb sync: lidar " << lc.id << " not in tolerance (dt=" << best_dt << ")";
+            continue;
+        }
+        selected_begin[lc.id] = best_begin;
+    }
+
+    // Check IMU coverage: leader IMU must cover up to ref_end
+    const auto* leader_imu_cfg = multibody_cfg_.findImuByBody(multibody_cfg_.leader_body_id);
+    if (!leader_imu_cfg) return false;
+    auto& leader_imu_buf = mb_imu_buffers_[leader_imu_cfg->id];
+    if (leader_imu_buf.empty() || leader_imu_buf.back()->timestamp < ref_end) {
+        LOG(INFO) << "mb sync: leader IMU not enough coverage, last_imu="
+                  << (leader_imu_buf.empty() ? 0.0 : leader_imu_buf.back()->timestamp)
+                  << " < ref_end=" << ref_end;
+        return false;
+    }
+
+    // Build measure group
+    mb_measures_.lidars.clear();
+    mb_measures_.imus.clear();
+    mb_measures_.lidar_begin_time = ref_begin;
+    mb_measures_.lidar_end_time = ref_end;
+
+    // Collect selected entries and compute global time bounds
+    double global_begin = ref_begin;
+    double global_end = ref_end;
+
+    for (const auto& [lidar_id, begin_time] : selected_begin) {
+        auto& buf = mb_lidar_buffers_[lidar_id];
+        for (const auto& entry : buf) {
+            if (entry.begin_time == begin_time) {
+                mb_measures_.lidars[lidar_id] = entry;
+                global_begin = std::min(global_begin, entry.begin_time);
+                global_end = std::max(global_end, entry.end_time);
+                break;
+            }
+        }
+    }
+    mb_measures_.lidar_begin_time = global_begin;
+    mb_measures_.lidar_end_time = global_end;
+
+    // Collect IMU samples per body
+    for (const auto& ic : multibody_cfg_.imus) {
+        auto& buf = mb_imu_buffers_[ic.id];
+        std::deque<IMUPtr> window;
+        // Collect samples in [global_begin, global_end]
+        // Keep one sample before begin for interpolation continuity
+        while (!buf.empty() && buf.front()->timestamp < global_begin) {
+            if (window.empty()) {
+                window.push_back(buf.front());
+            } else {
+                window.front() = buf.front();
+            }
+            buf.pop_front();
+        }
+        while (!buf.empty() && buf.front()->timestamp <= global_end) {
+            window.push_back(buf.front());
+            buf.pop_front();
+        }
+        if (!window.empty()) {
+            mb_measures_.imus[ic.id] = std::move(window);
+        }
+    }
+
+    // Pop consumed lidar entries (by begin_time match)
+    for (const auto& [lidar_id, begin_time] : selected_begin) {
+        auto& buf = mb_lidar_buffers_[lidar_id];
+        while (!buf.empty() && buf.front().begin_time <= begin_time) {
+            buf.pop_front();
+        }
+    }
 
     return true;
 }
@@ -912,6 +1147,142 @@ CloudPtr LaserMapping::GetProjCloud() {
     auto cloud = scan_undistort_;
     ProjectKFs(cloud);
     return cloud;
+}
+
+void LaserMapping::ProcessNonLeaderBodies(const NavState& leader_seed, double seed_time) {
+    if (!tf_buffer_) {
+        LOG(WARNING) << "[non-leader] no TF buffer, skipping";
+        return;
+    }
+
+    const double lidar_begin = mb_measures_.lidar_begin_time;
+    const double lidar_end = mb_measures_.lidar_end_time;
+    const std::string& leader_imu_frame = multibody_cfg_.leader_imu_frame;
+
+    // Re-init non-leader states on first call
+    if (nonleader_states_.empty()) {
+        for (const auto& lc : multibody_cfg_.lidars) {
+            if (lc.is_leader) continue;
+            // Find or create state for this body
+            auto it = std::find_if(nonleader_states_.begin(), nonleader_states_.end(),
+                                   [&](const NonLeaderBodyState& s) { return s.body_id == lc.body_id; });
+            if (it == nonleader_states_.end()) {
+                NonLeaderBodyState state;
+                state.body_id = lc.body_id;
+                // Find IMU for this body
+                const auto* imu_cfg = multibody_cfg_.findImuByBody(lc.body_id);
+                if (imu_cfg) state.imu_id = imu_cfg->id;
+                nonleader_states_.push_back(std::move(state));
+                it = std::prev(nonleader_states_.end());
+            }
+            // Add this lidar to the body's list
+            if (std::find(it->lidar_ids.begin(), it->lidar_ids.end(), lc.id) == it->lidar_ids.end()) {
+                it->lidar_ids.push_back(lc.id);
+            }
+            // Set extrinsics on processor
+            it->processor.setExtrinsic(lc.R_lidar_imu, lc.t_lidar_imu);
+            it->processor.setGravity(leader_seed.grav_);
+        }
+    }
+
+    // Use seed_time if valid, else lidar_begin
+    const double effective_seed_time = (seed_time > 1e6) ? seed_time : lidar_begin;
+
+    for (auto& nl : nonleader_states_) {
+        // 1. Accumulate bias
+        auto imu_it = mb_measures_.imus.find(nl.imu_id);
+        if (imu_it == mb_measures_.imus.end() || imu_it->second.empty()) continue;
+
+        if (!nl.processor.isBiasReady()) {
+            nl.processor.accumulateBias(imu_it->second);
+            if (!nl.processor.isBiasReady()) continue;
+        }
+
+        // 2. Cross-body transforms via TF
+        const auto* nl_lidar_cfg = multibody_cfg_.findLidar(nl.lidar_ids.front());
+        if (!nl_lidar_cfg) continue;
+        const std::string& nl_imu_frame = nl_lidar_cfg->imu_frame;
+
+        Mat3d R_cross_seed, R_cross_end;
+        Vec3d t_cross_seed, t_cross_end;
+
+        auto lookup_cross = [&](double time, Mat3d& R_out, Vec3d& t_out) -> bool {
+            try {
+                auto tp = tf2::timeFromSec(time);
+                auto tf = tf_buffer_->lookupTransform(leader_imu_frame, nl_imu_frame, tp,
+                                                      tf2::durationFromSec(0.05));
+                Eigen::Isometry3d T = tf2::transformToEigen(tf.transform);
+                R_out = T.rotation();
+                t_out = T.translation();
+                return true;
+            } catch (const tf2::TransformException& ex) {
+                LOG(WARNING) << "[non-leader] TF lookup failed " << leader_imu_frame << " <- "
+                             << nl_imu_frame << " at t=" << time << ": " << ex.what();
+                return false;
+            }
+        };
+
+        // Try seed_time first, fall back to lidar_begin
+        bool seed_ok = lookup_cross(effective_seed_time, R_cross_seed, t_cross_seed);
+        if (!seed_ok) {
+            seed_ok = lookup_cross(lidar_begin, R_cross_seed, t_cross_seed);
+        }
+        bool end_ok = lookup_cross(lidar_end, R_cross_end, t_cross_end);
+
+        if (!seed_ok || !end_ok) {
+            LOG(WARNING) << "[non-leader] cross-body TF failed for body " << nl.body_id
+                         << ", skipping";
+            continue;
+        }
+
+        // 3. Compute seed state for non-leader
+        DeskewSeedState seed;
+        seed.rot = leader_seed.rot_.matrix() * R_cross_seed;
+        seed.pos = leader_seed.pos_ + leader_seed.rot_.matrix() * t_cross_seed;
+        // Velocity lever-arm correction
+        Vec3d omega_world = leader_seed.rot_.matrix() * nl.processor.getMeanGyr();
+        Vec3d lever = seed.pos - leader_seed.pos_;
+        seed.vel = leader_seed.vel_ + omega_world.cross(lever);
+        seed.bg = nl.processor.getMeanGyr();
+        seed.grav = leader_seed.grav_;
+
+        // 4. Pure forward propagation with non-leader IMU
+        nl.processor.pureForwardPropagation(imu_it->second, seed, effective_seed_time,
+                                            lidar_begin, lidar_end);
+
+        // 5. Deskew each non-leader lidar + cross-body align + merge
+        for (int lidar_id : nl.lidar_ids) {
+            auto lc_it = mb_measures_.lidars.find(lidar_id);
+            if (lc_it == mb_measures_.lidars.end() || !lc_it->second.cloud || lc_it->second.cloud->empty())
+                continue;
+
+            const auto* lc = multibody_cfg_.findLidar(lidar_id);
+            if (!lc) continue;
+
+            // Update extrinsics for this specific lidar (may differ within same body)
+            nl.processor.setExtrinsic(lc->R_lidar_imu, lc->t_lidar_imu);
+
+            // Copy + deskew
+            CloudPtr cloud_deskew = std::make_shared<PointCloudType>(*lc_it->second.cloud);
+            nl.processor.undistortLidar(cloud_deskew, lc_it->second.begin_time, lc_it->second.end_time);
+
+            // Cross-body alignment: non-leader IMU → leader IMU (at scan-end time)
+            for (auto& pt : cloud_deskew->points) {
+                Vec3d p(pt.x, pt.y, pt.z);
+                Vec3d p_aligned = R_cross_end * p + t_cross_end;
+                if (p_aligned.allFinite()) {
+                    pt.x = p_aligned(0);
+                    pt.y = p_aligned(1);
+                    pt.z = p_aligned(2);
+                }
+            }
+
+            // Merge into leader scan_undistort_
+            *scan_undistort_ += *cloud_deskew;
+            LOG(INFO) << "[non-leader] body=" << nl.body_id << " lidar=" << lidar_id
+                      << " merged " << cloud_deskew->size() << " pts";
+        }
+    }
 }
 
 }  // namespace lightning

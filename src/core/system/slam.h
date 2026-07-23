@@ -82,6 +82,7 @@ class SlamSystem {
     /// ros端保存地图的实现
     void SaveMap(const SaveMapService::Request::SharedPtr request, SaveMapService::Response::SharedPtr response);
     bool ConfigureExtrinsicFromTf(const YAML::Node& yaml);
+    bool InitMultiBody(const YAML::Node& yaml);
 
     Options options_;
     std::atomic_bool running_ = false;
@@ -108,6 +109,10 @@ class SlamSystem {
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_sub_ = nullptr;
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_sub_ = nullptr;
     rclcpp::Subscription<livox_ros_driver2::msg::CustomMsg>::SharedPtr livox_sub_ = nullptr;
+
+    // Multi-body subscriptions
+    std::vector<rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr> mb_imu_subs_;
+    std::vector<rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr> mb_cloud_subs_;
 };
 }  // namespace lightning
 

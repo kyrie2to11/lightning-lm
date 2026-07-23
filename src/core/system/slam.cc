@@ -5,6 +5,7 @@
 #include "core/system/slam.h"
 #include "core/g2p5/g2p5.h"
 #include "core/lio/laser_mapping.h"
+#include "core/lio/multibody.h"
 #include "core/loop_closing/loop_closing.h"
 #include "core/maps/tiled_map.h"
 #include "ui/pangolin_window.h"
@@ -92,38 +93,48 @@ bool SlamSystem::Init(const std::string& yaml_path) {
         /// subscribers
         node_ = std::make_shared<rclcpp::Node>("lightning_slam");
 
-        imu_topic_ = yaml["common"]["imu_topic"].as<std::string>();
-        cloud_topic_ = yaml["common"]["lidar_topic"].as<std::string>();
-        livox_topic_ = yaml["common"]["livox_lidar_topic"].as<std::string>();
+        // Check multi-body config
+        const bool multibody_enabled =
+            yaml["multibody"] && yaml["multibody"]["enabled"] && yaml["multibody"]["enabled"].as<bool>();
 
-        if (!ConfigureExtrinsicFromTf(yaml)) {
-            return false;
+        if (multibody_enabled) {
+            if (!InitMultiBody(yaml)) {
+                return false;
+            }
+        } else {
+            // Legacy single-lidar path
+            imu_topic_ = yaml["common"]["imu_topic"].as<std::string>();
+            cloud_topic_ = yaml["common"]["lidar_topic"].as<std::string>();
+            livox_topic_ = yaml["common"]["livox_lidar_topic"].as<std::string>();
+
+            if (!ConfigureExtrinsicFromTf(yaml)) {
+                return false;
+            }
+
+            rclcpp::QoS qos(10);
+
+            imu_sub_ = node_->create_subscription<sensor_msgs::msg::Imu>(
+                imu_topic_, qos, [this](sensor_msgs::msg::Imu::SharedPtr msg) {
+                    IMUPtr imu = std::make_shared<IMU>();
+                    imu->timestamp = ToSec(msg->header.stamp);
+                    imu->linear_acceleration =
+                        Vec3d(msg->linear_acceleration.x, msg->linear_acceleration.y, msg->linear_acceleration.z);
+                    imu->angular_velocity =
+                        Vec3d(msg->angular_velocity.x, msg->angular_velocity.y, msg->angular_velocity.z);
+
+                    ProcessIMU(imu);
+                });
+
+            cloud_sub_ = node_->create_subscription<sensor_msgs::msg::PointCloud2>(
+                cloud_topic_, qos, [this](sensor_msgs::msg::PointCloud2::SharedPtr cloud) {
+                    Timer::Evaluate([&]() { ProcessLidar(cloud); }, "Proc Lidar", true);
+                });
+
+            livox_sub_ = node_->create_subscription<livox_ros_driver2::msg::CustomMsg>(
+                livox_topic_, qos, [this](livox_ros_driver2::msg::CustomMsg ::SharedPtr cloud) {
+                    Timer::Evaluate([&]() { ProcessLidar(cloud); }, "Proc Lidar", true);
+                });
         }
-
-        rclcpp::QoS qos(10);
-        // qos.best_effort();
-
-        imu_sub_ = node_->create_subscription<sensor_msgs::msg::Imu>(
-            imu_topic_, qos, [this](sensor_msgs::msg::Imu::SharedPtr msg) {
-                IMUPtr imu = std::make_shared<IMU>();
-                imu->timestamp = ToSec(msg->header.stamp);
-                imu->linear_acceleration =
-                    Vec3d(msg->linear_acceleration.x, msg->linear_acceleration.y, msg->linear_acceleration.z);
-                imu->angular_velocity =
-                    Vec3d(msg->angular_velocity.x, msg->angular_velocity.y, msg->angular_velocity.z);
-
-                ProcessIMU(imu);
-            });
-
-        cloud_sub_ = node_->create_subscription<sensor_msgs::msg::PointCloud2>(
-            cloud_topic_, qos, [this](sensor_msgs::msg::PointCloud2::SharedPtr cloud) {
-                Timer::Evaluate([&]() { ProcessLidar(cloud); }, "Proc Lidar", true);
-            });
-
-        livox_sub_ = node_->create_subscription<livox_ros_driver2::msg::CustomMsg>(
-            livox_topic_, qos, [this](livox_ros_driver2::msg::CustomMsg ::SharedPtr cloud) {
-                Timer::Evaluate([&]() { ProcessLidar(cloud); }, "Proc Lidar", true);
-            });
 
         savemap_service_ = node_->create_service<SaveMapService>(
             "lightning/save_map", [this](const SaveMapService::Request::SharedPtr& req,
@@ -207,6 +218,143 @@ bool SlamSystem::ConfigureExtrinsicFromTf(const YAML::Node& yaml) {
         LOG(ERROR) << "Failed to lookup fasterlio extrinsic TF " << imu_frame_id << " <- "
                    << lidar_frame_id << ": " << ex.what();
         return false;
+    }
+
+    return true;
+}
+
+bool SlamSystem::InitMultiBody(const YAML::Node& yaml) {
+    MultiBodyConfig cfg;
+    const auto& mb = yaml["multibody"];
+
+    cfg.enabled = true;
+    cfg.leader_body_id = mb["leader_body_id"].as<std::string>();
+    cfg.leader_imu_frame = mb["leader_imu_frame"].as<std::string>();
+    if (mb["sync_tolerance"]) cfg.sync_tolerance = mb["sync_tolerance"].as<double>();
+
+    // Parse lidars
+    for (const auto& l : mb["lidars"]) {
+        MultiBodyLidarConfig lc;
+        lc.id = l["id"].as<int>();
+        lc.body_id = l["body"].as<std::string>();
+        lc.topic = l["topic"].as<std::string>();
+        lc.lidar_frame = l["lidar_frame"].as<std::string>();
+        lc.imu_frame = l["imu_frame"].as<std::string>();
+        lc.is_leader = (lc.body_id == cfg.leader_body_id);
+        cfg.lidars.push_back(lc);
+    }
+
+    // Parse imus
+    for (const auto& i : mb["imus"]) {
+        MultiBodyImuConfig ic;
+        ic.id = i["id"].as<int>();
+        ic.body_id = i["body"].as<std::string>();
+        ic.topic = i["topic"].as<std::string>();
+        cfg.imus.push_back(ic);
+    }
+
+    LOG(INFO) << "Multi-body config: " << cfg.lidars.size() << " lidars, " << cfg.imus.size()
+              << " imus, leader=" << cfg.leader_body_id;
+
+    // Create TF buffer for extrinsics + cross-body lookups
+    tf_buffer_ = std::make_shared<tf2_ros::Buffer>(node_->get_clock());
+    tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_, node_, true);
+
+    // Load extrinsics for each lidar from TF (T(imu_frame ← lidar_frame))
+    auto wait_for_tf = [&](const std::string& target, const std::string& source, double timeout) -> bool {
+        for (int i = 0; i < static_cast<int>(timeout * 10.0); ++i) {
+            if (tf_buffer_->canTransform(target, source, tf2::TimePointZero)) return true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        return tf_buffer_->canTransform(target, source, tf2::TimePointZero);
+    };
+
+    for (auto& lc : cfg.lidars) {
+        if (!wait_for_tf(lc.imu_frame, lc.lidar_frame, 5.0)) {
+            LOG(ERROR) << "Timed out waiting for TF " << lc.imu_frame << " <- " << lc.lidar_frame;
+            return false;
+        }
+        auto tf = tf_buffer_->lookupTransform(lc.imu_frame, lc.lidar_frame, tf2::TimePointZero,
+                                               tf2::durationFromSec(0.5));
+        Eigen::Isometry3d T = tf2::transformToEigen(tf.transform);
+        lc.R_lidar_imu = T.rotation();
+        lc.t_lidar_imu = T.translation();
+        LOG(INFO) << "Extrinsic " << lc.imu_frame << " <- " << lc.lidar_frame
+                  << ": t=" << lc.t_lidar_imu.transpose();
+    }
+
+    // Set leader extrinsic on LaserMapping (for ESKF observation model)
+    const auto* leader_lc = cfg.findLeaderLidar();
+    if (!leader_lc) {
+        LOG(ERROR) << "no leader lidar found";
+        return false;
+    }
+    lio_->SetExtrinsic(leader_lc->t_lidar_imu, leader_lc->R_lidar_imu);
+
+    // Initial world rotation from TF (same as legacy path)
+    const auto& fasterlio = yaml["fasterlio"];
+    const bool init_world_from_tf =
+        fasterlio["init_world_from_tf"] && fasterlio["init_world_from_tf"].as<bool>();
+    if (init_world_from_tf) {
+        const std::string world_frame = fasterlio["world_frame_id"].as<std::string>();
+        if (!wait_for_tf(world_frame, cfg.leader_imu_frame, 5.0)) {
+            LOG(ERROR) << "Timed out waiting for TF " << world_frame << " <- " << cfg.leader_imu_frame;
+            return false;
+        }
+        auto world_tf = tf_buffer_->lookupTransform(world_frame, cfg.leader_imu_frame,
+                                                     tf2::TimePointZero, tf2::durationFromSec(0.5));
+        Eigen::Isometry3d T_world_imu = tf2::transformToEigen(world_tf.transform);
+        lio_->SetInitialWorldImuRotation(T_world_imu.rotation());
+        LOG(INFO) << "Loaded initial world rotation from TF: " << world_frame << " <- " << cfg.leader_imu_frame;
+    }
+
+    // Pass config + TF buffer to LaserMapping
+    lio_->SetMultiBodyConfig(cfg);
+    lio_->SetTfBuffer(tf_buffer_);
+
+    // Create per-lidar subscriptions
+    rclcpp::QoS qos(10);
+    for (const auto& lc : cfg.lidars) {
+        int lidar_id = lc.id;
+        auto sub = node_->create_subscription<sensor_msgs::msg::PointCloud2>(
+            lc.topic, qos, [this, lidar_id](sensor_msgs::msg::PointCloud2::SharedPtr cloud) {
+                Timer::Evaluate(
+                    [&]() {
+                        if (running_ == false) return;
+                        lio_->ProcessPointCloud2(cloud, lidar_id);
+                        lio_->Run();
+                        auto kf = lio_->GetKeyframe();
+                        if (kf != cur_kf_) {
+                            cur_kf_ = kf;
+                            if (cur_kf_) {
+                                if (options_.with_loop_closing_) lc_->AddKF(cur_kf_);
+                                if (options_.with_gridmap_) g2p5_->PushKeyframe(cur_kf_);
+                                if (ui_) ui_->UpdateKF(cur_kf_);
+                            }
+                        }
+                    },
+                    "Proc Lidar MB", true);
+            });
+        mb_cloud_subs_.push_back(sub);
+        LOG(INFO) << "Subscribed lidar " << lidar_id << " (" << lc.body_id << ") on " << lc.topic;
+    }
+
+    // Create per-IMU subscriptions
+    for (const auto& ic : cfg.imus) {
+        int imu_id = ic.id;
+        auto sub = node_->create_subscription<sensor_msgs::msg::Imu>(
+            ic.topic, qos, [this, imu_id](sensor_msgs::msg::Imu::SharedPtr msg) {
+                if (running_ == false) return;
+                IMUPtr imu = std::make_shared<IMU>();
+                imu->timestamp = ToSec(msg->header.stamp);
+                imu->linear_acceleration =
+                    Vec3d(msg->linear_acceleration.x, msg->linear_acceleration.y, msg->linear_acceleration.z);
+                imu->angular_velocity =
+                    Vec3d(msg->angular_velocity.x, msg->angular_velocity.y, msg->angular_velocity.z);
+                lio_->ProcessIMU(imu, imu_id);
+            });
+        mb_imu_subs_.push_back(sub);
+        LOG(INFO) << "Subscribed imu " << imu_id << " (" << ic.body_id << ") on " << ic.topic;
     }
 
     return true;
