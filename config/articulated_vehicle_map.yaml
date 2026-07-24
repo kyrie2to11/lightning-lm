@@ -32,7 +32,7 @@ fasterlio:
   b_gyr_cov: 0.0001
   extrinsic_est_en: false
   extrinsic_from_tf: true
-  lidar_frame_id: rear_lidar_link
+  lidar_frame_id: base_footprint
   imu_frame_id: rear_lidar_imu_ned
   init_world_from_tf: true
   world_frame_id: rear_lidar_link
@@ -69,9 +69,9 @@ g2p5:
 
 system:
   with_loop_closing: true
-  with_ui: true # 启用 Pangolin 3D UI
-  with_2dui: true
-  with_g2p5: true # 输出 2D 栅格地图
+  with_ui: false # 启用 Pangolin 3D UI
+  with_2dui: false
+  with_g2p5: false
   step_on_kf: false
 
   enable_lidar_loc_skip: false

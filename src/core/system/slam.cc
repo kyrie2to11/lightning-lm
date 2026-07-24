@@ -2,6 +2,8 @@
 // Created by xiang on 25-5-6.
 //
 
+#include <sensor_msgs/msg/joint_state.hpp>
+
 #include "core/system/slam.h"
 #include "core/g2p5/g2p5.h"
 #include "core/lio/laser_mapping.h"
@@ -253,8 +255,30 @@ bool SlamSystem::InitMultiBody(const YAML::Node& yaml) {
         cfg.imus.push_back(ic);
     }
 
+    // Parse articulation joint config
+    if (mb["articulation"] && mb["articulation"]["joints"]) {
+        for (const auto& j : mb["articulation"]["joints"]) {
+            MultiBodyConfig::JointConfig jc;
+            jc.name = j["name"].as<std::string>();
+            jc.body_a = j["body_a"].as<std::string>();
+            jc.body_b = j["body_b"].as<std::string>();
+            auto pa = j["pin_position_a"].as<std::vector<double>>();
+            auto pb = j["pin_position_b"].as<std::vector<double>>();
+            auto ax = j["axis_a"].as<std::vector<double>>();
+            jc.pin_position_a = Vec3d(pa[0], pa[1], pa[2]);
+            jc.pin_position_b = Vec3d(pb[0], pb[1], pb[2]);
+            jc.axis = Vec3d(ax[0], ax[1], ax[2]);
+            if (j["zero_offset"]) jc.zero_offset = j["zero_offset"].as<double>();
+            jc.joint_state_name = j["joint_state_name"].as<std::string>();
+            cfg.joints.push_back(jc);
+        }
+        if (mb["articulation"]["joint_states_topic"]) {
+            cfg.joint_states_topic = mb["articulation"]["joint_states_topic"].as<std::string>();
+        }
+    }
+
     LOG(INFO) << "Multi-body config: " << cfg.lidars.size() << " lidars, " << cfg.imus.size()
-              << " imus, leader=" << cfg.leader_body_id;
+              << " imus, " << cfg.joints.size() << " joints, leader=" << cfg.leader_body_id;
 
     // Create TF buffer for extrinsics + cross-body lookups
     tf_buffer_ = std::make_shared<tf2_ros::Buffer>(node_->get_clock());
@@ -281,6 +305,48 @@ bool SlamSystem::InitMultiBody(const YAML::Node& yaml) {
         lc.t_lidar_imu = T.translation();
         LOG(INFO) << "Extrinsic " << lc.imu_frame << " <- " << lc.lidar_frame
                   << ": t=" << lc.t_lidar_imu.transpose();
+    }
+
+    // Load static base←imu transforms for explicit articulation kinematics
+    if (!cfg.joints.empty()) {
+        // Leader: T(leader_base ← leader_imu)
+        const std::string& leader_base = cfg.findLeaderLidar()->body_id == cfg.leader_body_id
+            ? (cfg.leader_body_id == "rear" ? "base_footprint" : "front_link")
+            : "base_footprint";
+        // Determine leader base frame from config
+        std::string leader_base_frame = "base_footprint";
+        std::string nonleader_base_frame = "front_link";
+        // Simple heuristic: rear body → base_footprint, front body → front_link
+        if (cfg.leader_body_id == "rear") {
+            leader_base_frame = "base_footprint";
+            nonleader_base_frame = "front_link";
+        } else {
+            leader_base_frame = "base_footprint";
+            nonleader_base_frame = "rear_link";
+        }
+
+        if (wait_for_tf(leader_base_frame, cfg.leader_imu_frame, 5.0)) {
+            auto tf = tf_buffer_->lookupTransform(leader_base_frame, cfg.leader_imu_frame,
+                                                   tf2::TimePointZero, tf2::durationFromSec(0.5));
+            Eigen::Isometry3d T = tf2::transformToEigen(tf.transform);
+            lio_->SetLeaderBaseImu(T.rotation(), T.translation());
+            LOG(INFO) << "Static T(" << leader_base_frame << " ← " << cfg.leader_imu_frame
+                      << "): t=" << T.translation().transpose();
+        }
+
+        // Non-leader: T(nl_imu ← nl_base) for each non-leader body
+        for (const auto& lc : cfg.lidars) {
+            if (lc.is_leader) continue;
+            std::string nl_base = (lc.body_id == "rear") ? "base_footprint" : "front_link";
+            if (wait_for_tf(lc.imu_frame, nl_base, 5.0)) {
+                auto tf = tf_buffer_->lookupTransform(lc.imu_frame, nl_base,
+                                                       tf2::TimePointZero, tf2::durationFromSec(0.5));
+                Eigen::Isometry3d T = tf2::transformToEigen(tf.transform);
+                lio_->SetNonLeaderImuBase(lc.body_id, T.rotation(), T.translation());
+                LOG(INFO) << "Static T(" << lc.imu_frame << " ← " << nl_base
+                          << "): t=" << T.translation().transpose();
+            }
+        }
     }
 
     // Set leader extrinsic on LaserMapping (for ESKF observation model)
@@ -355,6 +421,24 @@ bool SlamSystem::InitMultiBody(const YAML::Node& yaml) {
             });
         mb_imu_subs_.push_back(sub);
         LOG(INFO) << "Subscribed imu " << imu_id << " (" << ic.body_id << ") on " << ic.topic;
+    }
+
+    // Joint states subscription
+    if (!cfg.joints.empty()) {
+        const std::string& js_topic = cfg.joint_states_topic;
+        const std::string& joint_name = cfg.joints[0].joint_state_name;
+        joint_state_sub_ = node_->create_subscription<sensor_msgs::msg::JointState>(
+            js_topic, qos, [this, joint_name](sensor_msgs::msg::JointState::SharedPtr msg) {
+                if (running_ == false) return;
+                for (size_t i = 0; i < msg->name.size(); ++i) {
+                    if (msg->name[i] == joint_name && i < msg->position.size()) {
+                        double ts = ToSec(msg->header.stamp);
+                        lio_->ProcessJointStates(ts, msg->position[i]);
+                        break;
+                    }
+                }
+            });
+        LOG(INFO) << "Subscribed joint_states on " << js_topic << " (joint: " << joint_name << ")";
     }
 
     return true;

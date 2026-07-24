@@ -214,6 +214,11 @@ void LaserMapping::ProcessIMU(const lightning::IMUPtr &imu, int imu_id) {
     }
 }
 
+void LaserMapping::ProcessJointStates(double timestamp, double angle) {
+    UL lock(mtx_buffer_);
+    joint_state_buffer_.addSample(timestamp, angle);
+}
+
 void LaserMapping::ProcessPointCloud2(const sensor_msgs::msg::PointCloud2::SharedPtr &msg, int lidar_id) {
     UL lock(mtx_buffer_);
     Timer::Evaluate(
@@ -269,8 +274,12 @@ bool LaserMapping::Run() {
         }
 
         measures_.scan_ = lit->second.cloud;
-        measures_.lidar_begin_time_ = mb_measures_.lidar_begin_time;
-        measures_.lidar_end_time_ = mb_measures_.lidar_end_time;
+        // Use the LEADER's own begin/end time — NOT the global min/max.
+        // The global times include non-leader lidars which may have different
+        // timestamps. Using global times would give the leader's deskew
+        // an incorrect time range, causing IMU propagation errors.
+        measures_.lidar_begin_time_ = lit->second.begin_time;
+        measures_.lidar_end_time_ = lit->second.end_time;
         lidar_end_time_ = measures_.lidar_end_time_;
 
         // Leader IMU window
@@ -783,10 +792,36 @@ bool LaserMapping::SyncPackagesMultiBody() {
     mb_measures_.lidar_end_time = global_end;
 
     // Collect IMU samples per body
+    // CRITICAL: use per-body end times, NOT global_end. The leader's deskew
+    // (p_imu_->Process) uses measures_.lidar_begin/end_time_ which are the
+    // leader's own times. If the IMU window was collected up to global_end
+    // (which may be later than leader_end due to non-leader lidars), samples
+    // between leader_end and global_end are wasted. Worse, if global_begin
+    // is earlier than leader_begin, the window starts too early and the
+    // sync pops samples that the next frame's leader needs.
     for (const auto& ic : multibody_cfg_.imus) {
         auto& buf = mb_imu_buffers_[ic.id];
         std::deque<IMUPtr> window;
-        // Collect samples in [global_begin, global_end]
+
+        // Determine this IMU's body's lidar end time
+        double body_end = global_end;  // fallback
+        for (const auto& [lidar_id, begin_time] : selected_begin) {
+            const auto* lc = multibody_cfg_.findLidar(lidar_id);
+            if (lc && lc->body_id == ic.body_id) {
+                auto& lbuf = mb_lidar_buffers_[lidar_id];
+                for (const auto& entry : lbuf) {
+                    if (entry.begin_time == begin_time) {
+                        body_end = entry.end_time;
+                        break;
+                    }
+                }
+            }
+        }
+        // For the leader body, use ref_end (the leader lidar's end time)
+        if (ic.body_id == multibody_cfg_.leader_body_id) {
+            body_end = ref_end;
+        }
+
         // Keep one sample before begin for interpolation continuity
         while (!buf.empty() && buf.front()->timestamp < global_begin) {
             if (window.empty()) {
@@ -796,7 +831,7 @@ bool LaserMapping::SyncPackagesMultiBody() {
             }
             buf.pop_front();
         }
-        while (!buf.empty() && buf.front()->timestamp <= global_end) {
+        while (!buf.empty() && buf.front()->timestamp <= body_end) {
             window.push_back(buf.front());
             buf.pop_front();
         }
@@ -1188,6 +1223,12 @@ void LaserMapping::ProcessNonLeaderBodies(const NavState& leader_seed, double se
     // Use seed_time if valid, else lidar_begin
     const double effective_seed_time = (seed_time > 1e6) ? seed_time : lidar_begin;
 
+    // Gate: skip non-leader during sharp turns (omega > 0.3 rad/s).
+    // The 12-DOF EKF uses constant-velocity prediction (no online ba/grav).
+    // During turns, non-leader deskew amplifies prediction errors → pitch oscillation.
+    const double omega_mag = p_imu_->GetAngvelLast().norm();
+    if (omega_mag > 0.3) return;
+
     for (auto& nl : nonleader_states_) {
         // 1. Accumulate bias
         auto imu_it = mb_measures_.imus.find(nl.imu_id);
@@ -1198,41 +1239,58 @@ void LaserMapping::ProcessNonLeaderBodies(const NavState& leader_seed, double se
             if (!nl.processor.isBiasReady()) continue;
         }
 
-        // 2. Cross-body transforms via TF
-        const auto* nl_lidar_cfg = multibody_cfg_.findLidar(nl.lidar_ids.front());
-        if (!nl_lidar_cfg) continue;
-        const std::string& nl_imu_frame = nl_lidar_cfg->imu_frame;
-
+        // 2. Cross-body transforms via explicit articulation kinematics
         Mat3d R_cross_seed, R_cross_end;
         Vec3d t_cross_seed, t_cross_end;
 
-        auto lookup_cross = [&](double time, Mat3d& R_out, Vec3d& t_out) -> bool {
-            try {
-                auto tp = tf2::timeFromSec(time);
-                auto tf = tf_buffer_->lookupTransform(leader_imu_frame, nl_imu_frame, tp,
-                                                      tf2::durationFromSec(0.05));
-                Eigen::Isometry3d T = tf2::transformToEigen(tf.transform);
-                R_out = T.rotation();
-                t_out = T.translation();
-                return true;
-            } catch (const tf2::TransformException& ex) {
-                LOG(WARNING) << "[non-leader] TF lookup failed " << leader_imu_frame << " <- "
-                             << nl_imu_frame << " at t=" << time << ": " << ex.what();
-                return false;
-            }
+        auto compute_cross = [&](double time, Mat3d& R_out, Vec3d& t_out) -> bool {
+            if (multibody_cfg_.joints.empty() || joint_state_buffer_.empty()) return false;
+            auto angle_opt = joint_state_buffer_.interpolate(time);
+            if (!angle_opt) return false;
+
+            // Compute T(leader_base ← nl_base) from joint angle
+            Mat3d R_base; Vec3d t_base;
+            computeJointTransform(*angle_opt, multibody_cfg_.joints[0], R_base, t_base);
+
+            // Compose to T(leader_imu ← nl_imu)
+            auto it_r = R_nl_imu_base_.find(nl.body_id);
+            auto it_t = t_nl_imu_base_.find(nl.body_id);
+            if (it_r == R_nl_imu_base_.end()) return false;
+            composeCrossTransformIMU(R_base, t_base,
+                                     R_leader_base_imu_, t_leader_base_imu_,
+                                     it_r->second, it_t->second,
+                                     R_out, t_out);
+            return true;
         };
 
         // Try seed_time first, fall back to lidar_begin
-        bool seed_ok = lookup_cross(effective_seed_time, R_cross_seed, t_cross_seed);
+        bool seed_ok = compute_cross(effective_seed_time, R_cross_seed, t_cross_seed);
         if (!seed_ok) {
-            seed_ok = lookup_cross(lidar_begin, R_cross_seed, t_cross_seed);
+            seed_ok = compute_cross(lidar_begin, R_cross_seed, t_cross_seed);
         }
-        bool end_ok = lookup_cross(lidar_end, R_cross_end, t_cross_end);
+        bool end_ok = compute_cross(lidar_end, R_cross_end, t_cross_end);
 
         if (!seed_ok || !end_ok) {
-            LOG(WARNING) << "[non-leader] cross-body TF failed for body " << nl.body_id
-                         << ", skipping";
-            continue;
+            // Fallback to TF if explicit kinematics failed
+            const auto* nl_lidar_cfg = multibody_cfg_.findLidar(nl.lidar_ids.front());
+            if (!nl_lidar_cfg || !tf_buffer_) continue;
+            try {
+                auto tp_seed = tf2::timeFromSec(effective_seed_time);
+                auto tp_end = tf2::timeFromSec(lidar_end);
+                auto tf_seed = tf_buffer_->lookupTransform(leader_imu_frame, nl_lidar_cfg->imu_frame,
+                                                           tp_seed, tf2::durationFromSec(0.05));
+                auto tf_end = tf_buffer_->lookupTransform(leader_imu_frame, nl_lidar_cfg->imu_frame,
+                                                          tp_end, tf2::durationFromSec(0.05));
+                Eigen::Isometry3d T_seed = tf2::transformToEigen(tf_seed.transform);
+                Eigen::Isometry3d T_end = tf2::transformToEigen(tf_end.transform);
+                R_cross_seed = T_seed.rotation(); t_cross_seed = T_seed.translation();
+                R_cross_end = T_end.rotation(); t_cross_end = T_end.translation();
+                seed_ok = end_ok = true;
+            } catch (const tf2::TransformException& ex) {
+                LOG(WARNING) << "[non-leader] cross-body transform failed for body " << nl.body_id
+                             << " (explicit + TF fallback): " << ex.what();
+                continue;
+            }
         }
 
         // 3. Compute seed state for non-leader

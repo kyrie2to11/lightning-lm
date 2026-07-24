@@ -45,6 +45,23 @@ multibody:
       body: front
       topic: /imu/airy_front
 
+  articulation:
+    joint_states_topic: /joint_states
+    joints:
+      - name: lower_articulation_hinge
+        body_a: rear        # leader
+        body_b: front       # non-leader
+        # Pin position in leader base (base_footprint):
+        # base_footprint→rear_link: z=0.291, rear_link→pin: z=-0.110
+        # → pin in base_footprint: (0, 0, 0.181)
+        pin_position_a: [0.0, 0.0, 0.181]
+        # Pin position in non-leader base (front_link):
+        # pin→front_link: z=0.110 → front_link→pin: z=-0.110
+        pin_position_b: [0.0, 0.0, -0.110]
+        axis_a: [0.0, 0.0, 1.0]
+        zero_offset: 0.0
+        joint_state_name: lower_articulation_hinge_joint
+
 # fasterlio 参数（沿用单体的 ESKF / 降采样参数）
 fasterlio:
   lidar_type: 4  # ROBOSENSE（带逐点时间戳，需要去畸变）

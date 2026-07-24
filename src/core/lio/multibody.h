@@ -50,6 +50,20 @@ struct MultiBodyConfig {
     double sync_tolerance = 0.05;  // seconds — max time offset for multi-lidar grouping
     int nonleader_bias_init_frames = 20;
 
+    // Articulation joint config (explicit kinematics — no TF time lookup needed)
+    struct JointConfig {
+        std::string name;
+        std::string body_a;        // leader body
+        std::string body_b;        // non-leader body
+        Vec3d pin_position_a = Vec3d::Zero();  // pin in leader base frame
+        Vec3d pin_position_b = Vec3d::Zero();  // pin in non-leader base frame
+        Vec3d axis = Vec3d(0, 0, 1);           // rotation axis (same in both frames)
+        double zero_offset = 0.0;
+        std::string joint_state_name;          // name in /joint_states
+    };
+    std::vector<JointConfig> joints;
+    std::string joint_states_topic = "/joint_states";
+
     // Convenience accessors
     const MultiBodyLidarConfig* findLidar(int id) const {
         for (const auto& l : lidars)
@@ -97,6 +111,108 @@ struct DeskewSeedState {
     Vec3d bg = Vec3d::Zero();        // gyro bias
     Vec3d grav = Vec3d(0, 0, -9.81); // gravity in world frame
 };
+
+// ---------------------------------------------------------------------------
+// JointState buffer + interpolation
+// ---------------------------------------------------------------------------
+
+struct JointSample {
+    double timestamp = 0;
+    double angle = 0;
+};
+
+/// Thread-safe buffer of joint angle samples with linear interpolation.
+class JointStateBuffer {
+   public:
+    void addSample(double timestamp, double angle) {
+        samples_.emplace_back(JointSample{timestamp, angle});
+        // Keep buffer bounded
+        if (samples_.size() > 2000) samples_.pop_front();
+    }
+
+    /// Linear-interpolate joint angle at time t.
+    /// Returns nullopt if t is outside [front, back] (no extrapolation).
+    std::optional<double> interpolate(double t) const {
+        if (samples_.empty()) return std::nullopt;
+        if (samples_.size() == 1) {
+            return (std::abs(t - samples_[0].timestamp) < 0.1) ? std::optional<double>(samples_[0].angle) : std::nullopt;
+        }
+        if (t < samples_.front().timestamp || t > samples_.back().timestamp)
+            return std::nullopt;
+        // Binary search
+        auto it = std::lower_bound(samples_.begin(), samples_.end(), t,
+                                   [](const JointSample& s, double v) { return s.timestamp < v; });
+        if (it == samples_.end()) return samples_.back().angle;
+        if (it == samples_.begin()) return samples_.front().angle;
+        auto prev = it - 1;
+        double alpha = (t - prev->timestamp) / (it->timestamp - prev->timestamp);
+        return prev->angle + alpha * (it->angle - prev->angle);
+    }
+
+    bool empty() const { return samples_.empty(); }
+    size_t size() const { return samples_.size(); }
+
+   private:
+    std::deque<JointSample> samples_;
+};
+
+// ---------------------------------------------------------------------------
+// Articulation kinematics: explicit cross-body transform from joint angle
+// ---------------------------------------------------------------------------
+
+/// Compute T(leader_base ← nonleader_base) for a single revolute joint.
+///
+/// Formula (from colleague's articulation_kinematics.hpp):
+///   R = Rot(axis, phi + zero_offset)
+///   t = pin_a - R * pin_b
+///   T = [R t; 0 1]
+inline void computeJointTransform(double phi,
+                                  const MultiBodyConfig::JointConfig& cfg,
+                                  Mat3d& R_out, Vec3d& t_out) {
+    const double angle = phi + cfg.zero_offset;
+    const Vec3d axis = cfg.axis.normalized();
+    R_out = Eigen::AngleAxisd(angle, axis).toRotationMatrix();
+    t_out = cfg.pin_position_a - R_out * cfg.pin_position_b;
+}
+
+/// Compose full IMU-to-IMU cross-body transform:
+///   T(leader_imu ← nl_imu) = T(leader_imu ← leader_base)
+///                           × T(leader_base ← nl_base)    [articulation]
+///                           × T(nl_base ← nl_imu)
+///
+/// @param R_cross_base, t_cross_base  — articulation transform (leader_base ← nl_base)
+/// @param R_leader_base_imu, t_leader_base_imu  — T(leader_base ← leader_imu) [from TF static]
+/// @param R_nl_imu_base, t_nl_imu_base  — T(nl_base ← nl_imu) = inverse of T(nl_imu ← nl_base)
+///
+/// Actually we use: T(leader_imu ← leader_base) = inverse of T(leader_base ← leader_imu)
+/// But it's easier to work with T(leader_base ← leader_imu) and T(nl_imu ← nl_base) directly:
+///
+/// p_leader_imu = T(li←lb) × T(lb←nb) × T(nb←ni) × p_nl_imu
+/// where li=leader_imu, lb=leader_base, nb=nl_base, ni=nl_imu
+///
+/// We need T(li←lb) = inv(T(lb←li)).
+/// T(lb←li) is: R_lb_li, t_lb_li (from TF: leader_base ← leader_imu)
+/// T(li←lb) = R_lb_li^T, -R_lb_li^T × t_lb_li
+///
+/// T(nb←ni) = inv(T(ni←nb)).
+/// T(ni←nb) is: R_ni_nb, t_ni_nb (from TF: nl_imu ← nl_base)
+/// T(nb←ni) = R_ni_nb^T, -R_ni_nb^T × t_ni_nb
+inline void composeCrossTransformIMU(
+    const Mat3d& R_cross_base, const Vec3d& t_cross_base,
+    const Mat3d& R_lb_li, const Vec3d& t_lb_li,   // T(leader_base ← leader_imu)
+    const Mat3d& R_ni_nb, const Vec3d& t_ni_nb,   // T(nl_imu ← nl_base)
+    Mat3d& R_out, Vec3d& t_out) {
+    // T(li←lb) = inv(T(lb←li))
+    Mat3d R_li_lb = R_lb_li.transpose();
+    Vec3d t_li_lb = -R_li_lb * t_lb_li;
+    // T(nb←ni) = inv(T(ni←nb))
+    Mat3d R_nb_ni = R_ni_nb.transpose();
+    Vec3d t_nb_ni = -R_nb_ni * t_ni_nb;
+    // Compose: R = R_li_lb × R_cross_base × R_nb_ni
+    R_out = R_li_lb * R_cross_base * R_nb_ni;
+    // t = R_li_lb × (R_cross_base × t_nb_ni + t_cross_base) + t_li_lb
+    t_out = R_li_lb * (R_cross_base * t_nb_ni + t_cross_base) + t_li_lb;
+}
 
 // ---------------------------------------------------------------------------
 // NonLeaderImuProcessor

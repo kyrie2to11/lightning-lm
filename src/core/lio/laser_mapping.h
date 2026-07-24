@@ -84,6 +84,9 @@ class LaserMapping {
     /// 多体模式：处理指定 imu_id 的 IMU
     void ProcessIMU(const lightning::IMUPtr &msg_in, int imu_id);
 
+    /// 多体模式：处理 joint_states
+    void ProcessJointStates(double timestamp, double angle);
+
     void ProcessIMU(const lightning::IMUPtr &msg_in);
 
     /// 保存前端的地图
@@ -101,6 +104,10 @@ class LaserMapping {
         if (leader_lc) leader_lidar_id_ = leader_lc->id;
     }
     void SetTfBuffer(std::shared_ptr<tf2_ros::Buffer> buf) { tf_buffer_ = buf; }
+    void SetLeaderBaseImu(const Mat3d& R, const Vec3d& t) { R_leader_base_imu_ = R; t_leader_base_imu_ = t; }
+    void SetNonLeaderImuBase(const std::string& body_id, const Mat3d& R, const Vec3d& t) {
+        R_nl_imu_base_[body_id] = R; t_nl_imu_base_[body_id] = t;
+    }
     const Vec3d &GetExtrinsicTranslation() const { return offset_t_lidar_fixed_; }
     const Mat3d &GetExtrinsicRotation() const { return offset_R_lidar_fixed_; }
 
@@ -259,6 +266,14 @@ class LaserMapping {
     // ---- multi-body members ----
     MultiBodyConfig multibody_cfg_;
     std::shared_ptr<tf2_ros::Buffer> tf_buffer_ = nullptr;
+    JointStateBuffer joint_state_buffer_;
+
+    // Static base←imu transforms (looked up once at startup)
+    Mat3d R_leader_base_imu_ = Mat3d::Identity();  // T(leader_base ← leader_imu)
+    Vec3d t_leader_base_imu_ = Vec3d::Zero();
+    // Per-non-leader-body: T(nl_imu ← nl_base)
+    std::map<std::string, Mat3d> R_nl_imu_base_;
+    std::map<std::string, Vec3d> t_nl_imu_base_;
 
     // Per-lidar buffers (lidar_id → deque)
     std::map<int, std::deque<LidarEntry>> mb_lidar_buffers_;
