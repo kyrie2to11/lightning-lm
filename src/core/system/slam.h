@@ -7,6 +7,7 @@
 
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/imu.hpp>
+#include <sensor_msgs/msg/joint_state.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <string>
 #include <tf2_ros/buffer.h>
@@ -75,6 +76,9 @@ class SlamSystem {
     void ProcessLidar(const sensor_msgs::msg::PointCloud2::SharedPtr& cloud);
     void ProcessLidar(const livox_ros_driver2::msg::CustomMsg::SharedPtr& cloud);
 
+    /// 处理 JointStates（多体模式）
+    void ProcessJointStates(const sensor_msgs::msg::JointState::SharedPtr& msg);
+
     /// 实时模式下的spin
     void Spin();
 
@@ -113,6 +117,7 @@ class SlamSystem {
     // Multi-body subscriptions
     std::vector<rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr> mb_imu_subs_;
     std::vector<rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr> mb_cloud_subs_;
+    rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_state_sub_ = nullptr;
 };
 }  // namespace lightning
 
