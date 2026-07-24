@@ -1,5 +1,7 @@
 #include <pcl/common/transforms.h>
 #include <yaml-cpp/yaml.h>
+#include <algorithm>
+#include <cmath>
 #include <fstream>
 #include <tf2_eigen/tf2_eigen.hpp>
 
@@ -234,6 +236,32 @@ void LaserMapping::ProcessPointCloud2(const sensor_msgs::msg::PointCloud2::Share
             CloudPtr cloud(new PointCloudType());
             preprocess_->Process(msg, cloud);
 
+            // Intra-body alignment: transform non-primary LiDARs to their
+            // body's primary LiDAR frame, so deskew uses one set of extrinsics
+            // per body (colleague's async_lio_node.cpp:755-777).
+            const auto* lc = multibody_cfg_.findLidar(lidar_id);
+            if (lc) {
+                int primary_id = multibody_cfg_.getPrimaryLidar(lc->body_id);
+                if (primary_id >= 0 && lidar_id != primary_id) {
+                    const auto* lc_primary = multibody_cfg_.findLidar(primary_id);
+                    if (lc_primary) {
+                        // T(primary ← lidar_i) = inv(T(imu ← primary)) × T(imu ← lidar_i)
+                        // R = R_L_I_primary^T × R_L_I_i
+                        // t = R_L_I_primary^T × (t_L_I_i - t_L_I_primary)
+                        Mat3d R_align = lc_primary->R_lidar_imu.transpose() * lc->R_lidar_imu;
+                        Vec3d t_align = lc_primary->R_lidar_imu.transpose() *
+                                        (lc->t_lidar_imu - lc_primary->t_lidar_imu);
+                        for (auto& pt : cloud->points) {
+                            Vec3d p(pt.x, pt.y, pt.z);
+                            Vec3d p_aligned = R_align * p + t_align;
+                            pt.x = p_aligned(0);
+                            pt.y = p_aligned(1);
+                            pt.z = p_aligned(2);
+                        }
+                    }
+                }
+            }
+
             LidarEntry entry;
             entry.cloud = cloud;
             entry.begin_time = timestamp;
@@ -364,6 +392,22 @@ bool LaserMapping::Run() {
 
     flg_EKF_inited_ = (measures_.lidar_begin_time_ - first_lidar_time_) >= fasterlio::INIT_TIME;
 
+    // NaN/Inf filter (colleague's async_lio_node_main_loop.cpp:727-751)
+    {
+        auto& pts = scan_undistort_->points;
+        size_t before = pts.size();
+        auto new_end = std::remove_if(pts.begin(), pts.end(), [](const PointType& p) {
+            return !std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z);
+        });
+        pts.erase(new_end, pts.end());
+        scan_undistort_->width = pts.size();
+        scan_undistort_->height = 1;
+        size_t removed = before - pts.size();
+        if (removed > 0) {
+            LOG(INFO) << "NaN/Inf filter removed " << removed << "/" << before << " points";
+        }
+    }
+
     /// downsample
     voxel_scan_.setInputCloud(scan_undistort_);
     voxel_scan_.filter(*scan_down_body_);
@@ -483,7 +527,7 @@ void LaserMapping::ProjectKFs(CloudPtr cloud, int size_limit) {
         // LOG(INFO) << "projecting kf: " << kf->GetID();
         // if (last_kf_) {
         // auto kf = last_kf_;
-        SE3 pose = pose_cur * kf->GetLIOPose() * SE3(offset_R_lidar_fixed_, offset_t_lidar_fixed_);
+        SE3 pose = pose_cur * kf->GetLIOPose();
 
         int cnt = 0;
         for (auto &pt : kf->GetCloud()->points) {
@@ -931,8 +975,9 @@ void LaserMapping::ObsModel(NavState &s, ESKF::CustomObservationModel &obs) {
 
     Timer::Evaluate(
         [&, this]() {
-            Mat3f R_wl = (s.rot_.matrix() * offset_R_lidar_fixed_).cast<float>();
-            Vec3f t_wl = (s.rot_ * offset_t_lidar_fixed_ + s.pos_).cast<float>();
+            // Points are in IMU body frame — no LiDAR-IMU extrinsic needed.
+            Mat3f R_wl = s.rot_.matrix().cast<float>();
+            Vec3f t_wl = s.pos_.cast<float>();
 
             std::for_each(std::execution::par_unseq, index.begin(), index.end(), [&](const size_t &i) {
                 PointType &point_body = scan_down_body_->points[i];
@@ -1005,8 +1050,7 @@ void LaserMapping::ObsModel(NavState &s, ESKF::CustomObservationModel &obs) {
     }
 
     index.resize(effect_feat_surf_);
-    const Mat3f off_R = offset_R_lidar_fixed_.cast<float>();
-    const Vec3f off_t = offset_t_lidar_fixed_.cast<float>();
+    // Points are already in IMU body frame — no extrinsic offset needed.
     const Mat3f Rt = s.rot_.matrix().transpose().cast<float>();
 
     /// 点面ICP部分
@@ -1020,7 +1064,8 @@ void LaserMapping::ObsModel(NavState &s, ESKF::CustomObservationModel &obs) {
 
     std::for_each(std::execution::par_unseq, index.begin(), index.end(), [&](const size_t &i) {
         Vec3f point_this_be = corr_pts_[i].head<3>();
-        Vec3f point_this = off_R * point_this_be + off_t;
+        // Points already in IMU body frame — no extrinsic transform needed
+        Vec3f point_this = point_this_be;
         Mat3f point_crossmat = math::SKEW_SYM_MATRIX(point_this);
 
         /*** get the normal vector of closest surface/corner ***/
@@ -1084,8 +1129,8 @@ void LaserMapping::ObsModel(NavState &s, ESKF::CustomObservationModel &obs) {
             /// translation 部分
             J.block<3, 3>(0, 0) = Mat3d::Identity();
 
-            /// rotation 部分
-            J.block<3, 3>(0, 3) = -(s.rot_.matrix() * offset_R_lidar_fixed_) * SO3::hat(q);
+            /// rotation 部分 (points in IMU body frame, no LiDAR extrinsic)
+            J.block<3, 3>(0, 3) = -s.rot_.matrix() * SO3::hat(q);
 
             Vec3d e = qs - nearest_points_[i][0].getVector3fMap().cast<double>();
 
@@ -1131,12 +1176,11 @@ CloudPtr LaserMapping::GetGlobalMap(bool use_lio_pose, bool use_voxel, float res
 
         CloudPtr cloud_trans(new PointCloudType);
 
-        // 点云在 lidar 系，需要 T_world_lidar = T_world_imu * T_imu_lidar
-        const SE3 T_imu_lidar(offset_R_lidar_fixed_, offset_t_lidar_fixed_);
+        // 点云在 IMU body 帧，直接用 T_world_imu 变换（无外参）
         if (use_lio_pose) {
-            pcl::transformPointCloud(*cloud_filter, *cloud_trans, (kf->GetLIOPose() * T_imu_lidar).matrix());
+            pcl::transformPointCloud(*cloud_filter, *cloud_trans, kf->GetLIOPose().matrix());
         } else {
-            pcl::transformPointCloud(*cloud_filter, *cloud_trans, (kf->GetOptPose() * T_imu_lidar).matrix());
+            pcl::transformPointCloud(*cloud_filter, *cloud_trans, kf->GetOptPose().matrix());
         }
 
         *global_map += *cloud_trans;
@@ -1319,37 +1363,23 @@ void LaserMapping::ProcessNonLeaderBodies(const NavState& leader_seed, double se
             const auto* lc = multibody_cfg_.findLidar(lidar_id);
             if (!lc) continue;
 
-            // Update extrinsics for this specific lidar (may differ within same body)
-            nl.processor.setExtrinsic(lc->R_lidar_imu, lc->t_lidar_imu);
+            // Use the PRIMARY LiDAR's extrinsics for all same-body LiDARs
+            // (intra-body alignment already transformed non-primary to primary frame)
+            int primary_id = multibody_cfg_.getPrimaryLidar(lc->body_id);
+            const auto* lc_ext = (primary_id >= 0) ? multibody_cfg_.findLidar(primary_id) : lc;
+            if (!lc_ext) lc_ext = lc;
+            nl.processor.setExtrinsic(lc_ext->R_lidar_imu, lc_ext->t_lidar_imu);
 
             // Copy + deskew (output: non-leader LiDAR frame at scan-end)
             CloudPtr cloud_deskew = std::make_shared<PointCloudType>(*lc_it->second.cloud);
             nl.processor.undistortLidar(cloud_deskew, lc_it->second.begin_time, lc_it->second.end_time);
 
-            // Cross-body alignment at scan-end: non-leader LiDAR → leader LiDAR.
-            // The deskew outputs points in the non-leader LiDAR frame (lightning
-            // convention: R_L_I^T × (… − t_L_I) wrapping transforms back to LiDAR).
-            // So the cross-body transform must be T(leader_lidar ← nonleader_lidar),
-            // NOT T(leader_imu ← nonleader_imu) which the colleague uses (their
-            // deskew outputs IMU-frame points without the wrapping).
-            //
-            // Compute from IMU-to-IMU cross_end + extrinsics:
-            //   T(leader_lidar ← nl_lidar) = T(leader_lidar ← leader_imu)
-            //                               × T(leader_imu ← nl_imu)      [= cross_end]
-            //                               × T(nl_imu ← nl_lidar)
-            // T(leader_lidar ← leader_imu) = inverse of leader extrinsic
-            // T(nl_imu ← nl_lidar) = nl extrinsic
-            const Mat3d& R_L_I_leader = multibody_cfg_.findLeaderLidar()->R_lidar_imu;
-            const Vec3d& t_L_I_leader = multibody_cfg_.findLeaderLidar()->t_lidar_imu;
-            // R_leader_lidar_from_imu = R_L_I_leader^T (IMU→LiDAR)
-            // t_leader_lidar_from_imu = -R_L_I_leader^T × t_L_I_leader
-            Mat3d R_ldr_cross = R_L_I_leader.transpose() * R_cross_end * lc->R_lidar_imu;
-            Vec3d t_ldr_cross = R_L_I_leader.transpose() *
-                                (R_cross_end * lc->t_lidar_imu + t_cross_end - t_L_I_leader);
-
+            // Cross-body alignment at scan-end: non-leader IMU → leader IMU.
+            // deskew now outputs in IMU body frame (aligned with colleague's convention),
+            // so cross-body is simply the IMU-to-IMU transform — no LiDAR-IMU unwrapping.
             for (auto& pt : cloud_deskew->points) {
                 Vec3d p(pt.x, pt.y, pt.z);
-                Vec3d p_aligned = R_ldr_cross * p + t_ldr_cross;
+                Vec3d p_aligned = R_cross_end * p + t_cross_end;
                 if (p_aligned.allFinite()) {
                     pt.x = p_aligned(0);
                     pt.y = p_aligned(1);
@@ -1357,7 +1387,7 @@ void LaserMapping::ProcessNonLeaderBodies(const NavState& leader_seed, double se
                 }
             }
 
-            // Merge into leader scan_undistort_ (in leader LiDAR frame)
+            // Merge into leader scan_undistort_ (in leader IMU body frame)
             *scan_undistort_ += *cloud_deskew;
             LOG(INFO) << "[non-leader] body=" << nl.body_id << " lidar=" << lidar_id
                       << " merged " << cloud_deskew->size() << " pts";

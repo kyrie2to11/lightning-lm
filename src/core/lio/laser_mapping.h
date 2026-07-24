@@ -102,6 +102,12 @@ class LaserMapping {
         multibody_cfg_ = cfg;
         const auto* leader_lc = cfg.findLeaderLidar();
         if (leader_lc) leader_lidar_id_ = leader_lc->id;
+        // Build body_id → primary lidar_id map from IMU configs
+        for (const auto& ic : cfg.imus) {
+            if (ic.lidar_id >= 0) {
+                multibody_cfg_.body_primary_lidar[ic.body_id] = ic.lidar_id;
+            }
+        }
     }
     void SetTfBuffer(std::shared_ptr<tf2_ros::Buffer> buf) { tf_buffer_ = buf; }
     void SetLeaderBaseImu(const Mat3d& R, const Vec3d& t) { R_leader_base_imu_ = R; t_leader_base_imu_ = t; }
@@ -156,9 +162,10 @@ class LaserMapping {
     void ObsModel(NavState &s, ESKF::CustomObservationModel &obs);
 
     inline void PointBodyToWorld(const PointType &pi, PointType &po) {
-        Vec3d p_global(state_point_.rot_ *
-                           (offset_R_lidar_fixed_ * pi.getVector3fMap().cast<double>() + offset_t_lidar_fixed_) +
-                       state_point_.pos_);
+        // Points are in IMU body frame (aligned with colleague's convention).
+        // No LiDAR-IMU extrinsic needed here.
+        Vec3d p_global(state_point_.rot_ * pi.getVector3fMap().cast<double>() +
+                        state_point_.pos_);
 
         po.x = p_global(0);
         po.y = p_global(1);

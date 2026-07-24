@@ -39,6 +39,7 @@ struct MultiBodyImuConfig {
     int id = -1;
     std::string body_id;
     std::string topic;
+    int lidar_id = -1;  // primary LiDAR paired with this IMU
 };
 
 struct MultiBodyConfig {
@@ -79,6 +80,14 @@ struct MultiBodyConfig {
         for (const auto& l : lidars)
             if (l.is_leader) return &l;
         return nullptr;
+    }
+
+    // body_id → primary lidar_id (the LiDAR paired with that body's IMU)
+    std::map<std::string, int> body_primary_lidar;
+
+    int getPrimaryLidar(const std::string& body_id) const {
+        auto it = body_primary_lidar.find(body_id);
+        return (it != body_primary_lidar.end()) ? it->second : -1;
     }
 };
 
@@ -400,9 +409,8 @@ class NonLeaderImuProcessor {
                 Vec3d T_ei(pos_imu + vel_imu * dt + 0.5 * acc_imu * dt * dt - pos_end);
 
                 Vec3d P_i(it_pcl->x, it_pcl->y, it_pcl->z);
-                Vec3d p_comp = R_lidar_imu_.transpose() *
-                               (R_end.transpose() * (R_i * (R_lidar_imu_ * P_i + t_lidar_imu_) + T_ei) -
-                                t_lidar_imu_);
+                Vec3d P_body_at_ti = R_lidar_imu_ * P_i + t_lidar_imu_;
+                Vec3d p_comp = R_end.transpose() * (R_i * P_body_at_ti + T_ei);
 
                 it_pcl->x = p_comp(0);
                 it_pcl->y = p_comp(1);

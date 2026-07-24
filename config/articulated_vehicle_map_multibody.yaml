@@ -41,9 +41,11 @@ multibody:
     - id: 0
       body: rear
       topic: /imu/airy_rear
+      lidar_id: 0
     - id: 1
       body: front
       topic: /imu/airy_front
+      lidar_id: 1
 
   articulation:
     joint_states_topic: /joint_states
@@ -116,7 +118,7 @@ g2p5:
 
 system:
   with_loop_closing: true
-  with_ui: true
+  with_ui: false
   with_2dui: false
   with_g2p5: false
   step_on_kf: false

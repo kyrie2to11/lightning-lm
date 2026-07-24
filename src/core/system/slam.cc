@@ -252,6 +252,7 @@ bool SlamSystem::InitMultiBody(const YAML::Node& yaml) {
         ic.id = i["id"].as<int>();
         ic.body_id = i["body"].as<std::string>();
         ic.topic = i["topic"].as<std::string>();
+        if (i["lidar_id"]) ic.lidar_id = i["lidar_id"].as<int>();
         cfg.imus.push_back(ic);
     }
 
