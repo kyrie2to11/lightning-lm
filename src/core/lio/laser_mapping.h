@@ -10,6 +10,7 @@
 #include "common/eigen_types.h"
 #include "common/imu.h"
 #include "common/keyframe.h"
+#include "common/data_capture.h"
 #include "common/options.h"
 #include "core/ivox3d/ivox3d.h"
 #include "core/lio/eskf.hpp"
@@ -42,6 +43,7 @@ class LaserMapping {
         double icp_weight_ = 100;        // ICP部分的权重
 
         int min_pts = 300;  // 配准所需的点数
+        int max_observation_points = 0;  // >0 时限制 ESKF 观测点数
 
         /// 关键帧阈值
         double kf_dis_th_ = 2.0;
@@ -104,6 +106,8 @@ class LaserMapping {
         if (leader_lc) leader_lidar_id_ = leader_lc->id;
     }
     void SetTfBuffer(std::shared_ptr<tf2_ros::Buffer> buf) { tf_buffer_ = buf; }
+
+    DataCapture data_capture_;
     void SetLeaderBaseImu(const Mat3d& R, const Vec3d& t) { R_leader_base_imu_ = R; t_leader_base_imu_ = t; }
     void SetNonLeaderImuBase(const std::string& body_id, const Mat3d& R, const Vec3d& t) {
         R_nl_imu_base_[body_id] = R; t_nl_imu_base_[body_id] = t;
@@ -156,9 +160,9 @@ class LaserMapping {
     void ObsModel(NavState &s, ESKF::CustomObservationModel &obs);
 
     inline void PointBodyToWorld(const PointType &pi, PointType &po) {
-        Vec3d p_global(state_point_.rot_ *
-                           (offset_R_lidar_fixed_ * pi.getVector3fMap().cast<double>() + offset_t_lidar_fixed_) +
-                       state_point_.pos_);
+        // Points are in IMU body frame — no LiDAR-IMU extrinsic needed.
+        Vec3d p_global(state_point_.rot_ * pi.getVector3fMap().cast<double>() +
+                        state_point_.pos_);
 
         po.x = p_global(0);
         po.y = p_global(1);

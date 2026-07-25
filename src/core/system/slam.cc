@@ -36,6 +36,16 @@ bool SlamSystem::Init(const std::string& yaml_path) {
     }
 
     auto yaml = YAML::LoadFile(yaml_path);
+
+    // Data capture config
+    if (yaml["data_capture"] && yaml["data_capture"]["enabled"].as<bool>()) {
+        DataCapture::Params dp;
+        dp.enabled = true;
+        dp.output_dir = yaml["data_capture"]["output_dir"].as<std::string>();
+        lio_->data_capture_.configure(dp);
+        LOG(INFO) << "Data capture enabled: " << dp.output_dir;
+    }
+
     options_.with_loop_closing_ = yaml["system"]["with_loop_closing"].as<bool>();
     options_.with_visualization_ = yaml["system"]["with_ui"].as<bool>();
     options_.with_2dvisualization_ = yaml["system"]["with_2dui"].as<bool>();

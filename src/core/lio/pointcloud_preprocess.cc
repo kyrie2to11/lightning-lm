@@ -197,8 +197,8 @@ void PointCloudPreprocess::PolkaMergedHandler(const sensor_msgs::msg::PointCloud
     cloud_full_.clear();
 
     if (!expected_frame_.empty() && msg->header.frame_id != expected_frame_) {
-        throw std::invalid_argument(
-            "Polka merged PointCloud2 frame must be '" + expected_frame_ + "'");
+        LOG(WARNING) << "Polka merged PointCloud2 frame is '" << msg->header.frame_id
+                     << "', expected '" << expected_frame_ << "' — accepting anyway";
     }
     for (const char *name : {"x", "y", "z", "intensity"}) {
         const auto field = std::find_if(msg->fields.begin(), msg->fields.end(), [name](const auto &candidate) {

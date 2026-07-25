@@ -1,6 +1,9 @@
 #include <pcl/common/transforms.h>
 #include <yaml-cpp/yaml.h>
+#include <algorithm>
+#include <cmath>
 #include <fstream>
+#include <random>
 #include <tf2_eigen/tf2_eigen.hpp>
 
 #include "common/options.h"
@@ -99,6 +102,9 @@ bool LaserMapping::LoadParamsFromYAML(const std::string &yaml_file) {
         options_.kf_angle_th_ = yaml["fasterlio"]["kf_angle_th"].as<double>() * M_PI / 180.0;
         options_.enable_icp_part_ = yaml["fasterlio"]["enable_icp_part"].as<bool>();
         options_.min_pts = yaml["fasterlio"]["min_pts"].as<int>();
+        if (yaml["fasterlio"]["max_observation_points"]) {
+            options_.max_observation_points = yaml["fasterlio"]["max_observation_points"].as<int>();
+        }
         options_.plane_icp_weight_ = yaml["fasterlio"]["plane_icp_weight"].as<float>();
 
         bool use_imu_filter = yaml["fasterlio"]["imu_filter"].as<bool>();
@@ -184,6 +190,13 @@ void LaserMapping::ProcessIMU(const lightning::IMUPtr &imu) {
     }
 
     last_timestamp_imu_ = timestamp;
+
+    // Data capture: IMU CSV
+    if (data_capture_.enabled()) {
+        data_capture_.appendImu(timestamp,
+                                imu->linear_acceleration.x(), imu->linear_acceleration.y(), imu->linear_acceleration.z(),
+                                imu->angular_velocity.x(), imu->angular_velocity.y(), imu->angular_velocity.z());
+    }
 
     imu_buffer_.emplace_back(imu);
 }
@@ -309,6 +322,12 @@ bool LaserMapping::Run() {
     /// IMU process, kf prediction, undistortion
     p_imu_->Process(measures_, kf_, scan_undistort_, !preprocess_->InputIsPredeskewed());
 
+    // Data capture: deskewed
+    if (data_capture_.enabled()) {
+        data_capture_.startFrame(scan_count_);
+        data_capture_.savePcd("02_deskewed", *scan_undistort_);
+    }
+
     if (scan_undistort_->empty() || (scan_undistort_ == nullptr)) {
         LOG(WARNING) << "No point, skip this scan!";
         return false;
@@ -391,6 +410,22 @@ bool LaserMapping::Run() {
         return false;
     }
 
+    // Data capture: obs input (downsampled, pre-limit)
+    if (data_capture_.enabled()) {
+        data_capture_.savePcd("03_obs_input_pre_limit", *scan_down_body_);
+    }
+
+    // Limit observation points (colleague's max_observation_points)
+    if (options_.max_observation_points > 0 && cur_pts > options_.max_observation_points) {
+        auto& pts = scan_down_body_->points;
+        std::random_device rd;
+        std::mt19937 g(rd());
+        std::shuffle(pts.begin(), pts.end(), g);
+        pts.resize(options_.max_observation_points);
+        scan_down_body_->width = options_.max_observation_points;
+        cur_pts = options_.max_observation_points;
+    }
+
     scan_down_world_->resize(cur_pts);
     nearest_points_.resize(cur_pts);
 
@@ -408,6 +443,18 @@ bool LaserMapping::Run() {
 
     state_point_ = kf_.GetX();
     state_point_.timestamp_ = measures_.lidar_end_time_;
+
+    // Data capture: EKF state CSV
+    if (data_capture_.enabled()) {
+        const Mat3d R_w_imu = state_point_.rot_.matrix();
+        double yaw = state_point_.rot_.angleZ<double>() * 180.0 / M_PI;
+        double pitch = asin(std::clamp(-R_w_imu(2, 0), -1.0, 1.0)) * 180.0 / M_PI;
+        double roll = atan2(R_w_imu(2, 1), R_w_imu(2, 2)) * 180.0 / M_PI;
+        Eigen::Quaterniond q(state_point_.rot_.unit_quaternion());
+        data_capture_.appendEkf(0, state_point_.pos_, q, state_point_.vel_,
+                                state_point_.bg_, yaw, pitch, roll,
+                                effect_feat_surf_, 0, 0);
+    }
 
     const double delta_translation = (pred_state.pos_ - state_point_.pos_).norm();
     const double delta_rotation_deg = (pred_state.rot_.inverse() * state_point_.rot_).log().norm() * 180.0 / M_PI;
@@ -470,6 +517,13 @@ bool LaserMapping::Run() {
               << ", vel: " << state_point_.vel_.transpose()
               << ", grav: " << state_point_.grav_.transpose() << ", grav norm: " << state_point_.grav_.norm();
 
+    // Debug: print R_world_imu columns every 50 frames to verify axes
+    if (scan_count_ % 50 == 0) {
+        LOG(INFO) << "[DBG R_wi] col0(IMU_X)=" << R_w_imu.col(0).transpose()
+                  << " col1(IMU_Y)=" << R_w_imu.col(1).transpose()
+                  << " col2(IMU_Z)=" << R_w_imu.col(2).transpose();
+    }
+
     prev_lidar_end_time_ = measures_.lidar_end_time_;
     return true;
 }
@@ -508,6 +562,11 @@ void LaserMapping::ProjectKFs(CloudPtr cloud, int size_limit) {
 
 void LaserMapping::MakeKF() {
     Keyframe::Ptr kf = std::make_shared<Keyframe>(kf_id_++, scan_undistort_, state_point_);
+
+    if (data_capture_.enabled()) {
+        data_capture_.savePcd("04_kf_cloud", *scan_undistort_);
+        data_capture_.flush();
+    }
 
     if (last_kf_) {
         /// opt pose 用之前的递推
@@ -931,8 +990,9 @@ void LaserMapping::ObsModel(NavState &s, ESKF::CustomObservationModel &obs) {
 
     Timer::Evaluate(
         [&, this]() {
-            Mat3f R_wl = (s.rot_.matrix() * offset_R_lidar_fixed_).cast<float>();
-            Vec3f t_wl = (s.rot_ * offset_t_lidar_fixed_ + s.pos_).cast<float>();
+            // Points in IMU body frame — no LiDAR extrinsic needed
+            Mat3f R_wl = s.rot_.matrix().cast<float>();
+            Vec3f t_wl = s.pos_.cast<float>();
 
             std::for_each(std::execution::par_unseq, index.begin(), index.end(), [&](const size_t &i) {
                 PointType &point_body = scan_down_body_->points[i];
@@ -1005,8 +1065,7 @@ void LaserMapping::ObsModel(NavState &s, ESKF::CustomObservationModel &obs) {
     }
 
     index.resize(effect_feat_surf_);
-    const Mat3f off_R = offset_R_lidar_fixed_.cast<float>();
-    const Vec3f off_t = offset_t_lidar_fixed_.cast<float>();
+    // Points already in IMU body frame — no extrinsic
     const Mat3f Rt = s.rot_.matrix().transpose().cast<float>();
 
     /// 点面ICP部分
@@ -1020,7 +1079,7 @@ void LaserMapping::ObsModel(NavState &s, ESKF::CustomObservationModel &obs) {
 
     std::for_each(std::execution::par_unseq, index.begin(), index.end(), [&](const size_t &i) {
         Vec3f point_this_be = corr_pts_[i].head<3>();
-        Vec3f point_this = off_R * point_this_be + off_t;
+        Vec3f point_this = point_this_be;  // already in IMU frame
         Mat3f point_crossmat = math::SKEW_SYM_MATRIX(point_this);
 
         /*** get the normal vector of closest surface/corner ***/
@@ -1085,7 +1144,7 @@ void LaserMapping::ObsModel(NavState &s, ESKF::CustomObservationModel &obs) {
             J.block<3, 3>(0, 0) = Mat3d::Identity();
 
             /// rotation 部分
-            J.block<3, 3>(0, 3) = -(s.rot_.matrix() * offset_R_lidar_fixed_) * SO3::hat(q);
+            J.block<3, 3>(0, 3) = -s.rot_.matrix() * SO3::hat(q);
 
             Vec3d e = qs - nearest_points_[i][0].getVector3fMap().cast<double>();
 
@@ -1131,12 +1190,11 @@ CloudPtr LaserMapping::GetGlobalMap(bool use_lio_pose, bool use_voxel, float res
 
         CloudPtr cloud_trans(new PointCloudType);
 
-        // 点云在 lidar 系，需要 T_world_lidar = T_world_imu * T_imu_lidar
-        const SE3 T_imu_lidar(offset_R_lidar_fixed_, offset_t_lidar_fixed_);
+        // Points in IMU body frame, direct transform
         if (use_lio_pose) {
-            pcl::transformPointCloud(*cloud_filter, *cloud_trans, (kf->GetLIOPose() * T_imu_lidar).matrix());
+            pcl::transformPointCloud(*cloud_filter, *cloud_trans, kf->GetLIOPose().matrix());
         } else {
-            pcl::transformPointCloud(*cloud_filter, *cloud_trans, (kf->GetOptPose() * T_imu_lidar).matrix());
+            pcl::transformPointCloud(*cloud_filter, *cloud_trans, kf->GetOptPose().matrix());
         }
 
         *global_map += *cloud_trans;

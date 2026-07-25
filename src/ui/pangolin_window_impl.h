@@ -142,8 +142,8 @@ class PangolinWindowImpl {
     pangolin::OpenGlRenderState s_cam_main_;
 
     /// cloud rendering
-    ui::UiCar backend_car_{Vec3f(0.2, 0.2, 0.8)};   // 白色车
-    ui::UiCar frontend_car_{Vec3f(0.2, 0.2, 0.8)};  // 白色车
+    ui::UiCar backend_car_{Vec3f(0.2, 0.2, 0.8), 1.5f, 2.0f};   // 后端：细短轴
+    ui::UiCar frontend_car_{Vec3f(0.2, 0.2, 0.8), 3.0f, 5.0f};  // 前端：粗长轴
     ui::UiCar pred_car_{Vec3f(0.8, 0.5, 0.8)};      // 白色车
 
     std::map<int, std::shared_ptr<ui::UiCloud>> cloud_map_ui_;  // 用来渲染的点云地图

@@ -303,7 +303,17 @@ inline void ImuProcess::UndistortPcl(const MeasureGroup &meas, ESKF &kf_state, C
     }
 
     if (!deskew_points) {
+        // Polka path: deskew skipped (pre-deskewed cloud), transform points
+        // from LiDAR/base_footprint frame to IMU body frame so that
+        // PointBodyToWorld/ObsModel don't need extrinsic offset.
         pcl_out = meas.scan_;
+        for (auto& pt : pcl_out->points) {
+            Vec3d p(pt.x, pt.y, pt.z);
+            Vec3d p_imu = R_lidar_imu_ * p + t_lidar_mu_;
+            pt.x = p_imu(0);
+            pt.y = p_imu(1);
+            pt.z = p_imu(2);
+        }
         return;
     }
 
@@ -339,14 +349,13 @@ inline void ImuProcess::UndistortPcl(const MeasureGroup &meas, ESKF &kf_state, C
             /* Transform to the 'end' frame, using only the rotation
              * Note: Compensation direction is INVERSE of Frame's moving direction
              * So if we want to compensate a point at timestamp-i to the frame-e
-             * p_compensate = R_imu_e ^ T * (R_i * P_i + T_ei) where T_ei is represented in global frame */
+             * Coordinate chain: P_L(t_i) → P_I(t_i) → P_W(t_i) → P_W(t_e) → P_I(t_e) */
             Mat3d R_i(R_imu * math::exp(angvel_avr, dt).matrix());
 
             Vec3d P_i(it_pcl->x, it_pcl->y, it_pcl->z);
             Vec3d T_ei(pos_imu + vel_imu * dt + 0.5 * acc_imu * dt * dt - imu_state.pos_);
-            Vec3d p_compensate = R_lidar_imu_.transpose() *
-                                 (imu_state.rot_.inverse() * (R_i * (R_lidar_imu_ * P_i + t_lidar_mu_) + T_ei) -
-                                  t_lidar_mu_);  // not accurate!
+            Vec3d P_body_at_ti = R_lidar_imu_ * P_i + t_lidar_mu_;
+            Vec3d p_compensate = imu_state.rot_.inverse() * (R_i * P_body_at_ti + T_ei);
 
             // save Undistorted points and their rotation
             it_pcl->x = p_compensate(0);
