@@ -1,9 +1,9 @@
 # 多体多激光雷达建图配置（直接订阅原始 RoboSense Airy 话题，不经过 polka）
 #
 # 3 部 Airy 激光雷达分布在前后两个车体：
-#   - rear  (leader):  rear_lidar_link + rear_lidar_imu_ned
-#   - front (non-leader): front_lidar_link + front_lidar_imu_ned
-#   - left_front (non-leader): left_front_lidar_link + front_lidar_imu_ned（共享前车体 IMU）
+#   - rear  (leader):  rear_lidar_link + rear_lidar_imu
+#   - front (non-leader): front_lidar_link + front_lidar_imu
+#   - left_front (non-leader): left_front_lidar_link + front_lidar_imu（共享前车体 IMU）
 #
 # 跨 body 变换通过 TF 查找 leader_imu_frame ← nonleader_imu_frame 实现，
 # 依赖 robot_state_publisher 发布的铰接关节 TF。
@@ -17,7 +17,7 @@ common:
 multibody:
   enabled: true
   leader_body_id: rear
-  leader_imu_frame: rear_lidar_imu_ned
+  leader_imu_frame: rear_lidar_imu
   sync_tolerance: 0.05  # 50ms 多雷达同步容差
 
   lidars:
@@ -25,17 +25,17 @@ multibody:
       body: rear
       topic: /pointcloud/airy_rear
       lidar_frame: rear_lidar_link
-      imu_frame: rear_lidar_imu_ned
+      imu_frame: rear_lidar_imu
     - id: 1
       body: front
       topic: /pointcloud/airy_front
       lidar_frame: front_lidar_link
-      imu_frame: front_lidar_imu_ned
+      imu_frame: front_lidar_imu
     - id: 2
       body: front
       topic: /pointcloud/airy_left_front
       lidar_frame: left_front_lidar_link
-      imu_frame: front_lidar_imu_ned
+      imu_frame: front_lidar_imu
 
   imus:
     - id: 0
@@ -88,7 +88,7 @@ fasterlio:
   extrinsic_est_en: false
   extrinsic_from_tf: true  # 多体模式下外参从 multibody TF 加载
   lidar_frame_id: rear_lidar_link
-  imu_frame_id: rear_lidar_imu_ned
+  imu_frame_id: rear_lidar_imu
   init_world_from_tf: true
   world_frame_id: rear_lidar_link
   # 以下仅在 extrinsic_from_tf: false 时作为 fallback

@@ -32,15 +32,15 @@ fasterlio:
   b_gyr_cov: 0.0001
   extrinsic_est_en: false
   extrinsic_from_tf: true
-  lidar_frame_id: rear_lidar_imu_ned
-  imu_frame_id: rear_lidar_imu_ned
+  lidar_frame_id: rear_lidar_imu
+  imu_frame_id: rear_lidar_imu
   init_world_from_tf: true
   world_frame_id: base_footprint
   # Extrinsic（lightning 约定：p_IMU = extrinsic_R * p_Lidar + extrinsic_T，
   # 即把点云坐标从 LiDAR 帧映射到 IMU 帧）。
   #   LiDAR 帧 = base_footprint（Polka 融合点云帧）
-  #   IMU  帧 = 后雷达内置 IMU raw NED 帧（rear_lidar_imu_ned）
-  # 默认在线模式从 TF 读取 T(rear_lidar_imu_ned <- base_footprint)。
+  #   IMU  帧 = 后雷达内置 IMU raw 帧（rear_lidar_imu）
+  # 默认在线模式从 TF 读取 T(rear_lidar_imu <- base_footprint)。
   # 下方手动矩阵保留为 extrinsic_from_tf: false 时的 fallback。
   #   R_difop/t_difop 取自后雷达 DIFOP IMU_CALIB(偏移1092)：q=(0.710,-0.704,5e-4,-2e-4), t=(0.00425,0.00418,-0.00446)
   #   T(rear_lidar_link<-base) = 实测 TF base->rear_lidar_link 的逆（平移[-0.6365,0,0.411]，R=[[0,0,-1],[0,-1,0],[-1,0,0]]）
