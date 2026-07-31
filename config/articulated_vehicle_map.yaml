@@ -69,7 +69,7 @@ g2p5:
   grid_map_resolution: 0.05 # 匹配 Nav2 的 0.05m 分辨率
 
 system:
-  with_loop_closing: true
+  with_loop_closing: false
   with_ui: true # 启用 Pangolin 3D UI
   with_2dui: false
   with_g2p5: false
@@ -88,7 +88,7 @@ loop_closing:
   loop_kf_gap: 20
   min_id_interval: 20
   closest_id_th: 50
-  max_range: 30.0
+  max_range: 8.0
   ndt_score_th: 1.0
   with_height: true # 平面场景，约束高度防 Z 轴漂移
 
