@@ -619,8 +619,9 @@ void LaserMapping::ProcessPointCloud2(const sensor_msgs::msg::PointCloud2::Share
         [&, this]() {
             scan_count_++;
             double timestamp = ToSec(msg->header.stamp);
-            if (timestamp < last_timestamp_lidar_) {
-                LOG(ERROR) << "lidar loop back, dt: " << timestamp - last_timestamp_lidar_;
+            if (timestamp <= last_timestamp_lidar_) {
+                LOG_EVERY_N(WARNING, 100)
+                    << "ignore non-increasing lidar timestamp, dt: " << timestamp - last_timestamp_lidar_;
                 return;
             }
 
