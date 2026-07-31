@@ -28,6 +28,16 @@ class ImuProcess {
    public:
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 
+    struct InitializationSnapshot {
+        Vec3d mean_acc = Vec3d::Zero();
+        Vec3d mean_gyr = Vec3d::Zero();
+        Vec3d cov_acc = Vec3d::Zero();
+        Vec3d cov_gyr = Vec3d::Zero();
+        int sample_count = 0;
+        bool initialized = false;
+        double acceleration_scale = 1.0;
+    };
+
     ImuProcess();
     ~ImuProcess();
 
@@ -49,6 +59,17 @@ class ImuProcess {
 
     double GetMeanAccNorm() const { return mean_acc_.norm(); }
     Vec3d GetAngvelLast() const { return angvel_last_; }
+    InitializationSnapshot GetInitializationSnapshot() const {
+        InitializationSnapshot snapshot;
+        snapshot.mean_acc = mean_acc_;
+        snapshot.mean_gyr = mean_gyr_;
+        snapshot.cov_acc = cov_acc_;
+        snapshot.cov_gyr = cov_gyr_;
+        snapshot.sample_count = init_iter_num_;
+        snapshot.initialized = IsIMUInited();
+        snapshot.acceleration_scale = acc_scale_factor_;
+        return snapshot;
+    }
 
     Eigen::Matrix<double, 12, 12> Q_;
     Vec3d cov_acc_;

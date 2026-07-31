@@ -114,5 +114,23 @@ TEST_F(DataCaptureTest, BackendEventPathDoesNotDependOnFrontendFrame) {
         output_dir_ / "backend" / "loop_000080_000120" / "source_body.pcd"));
 }
 
+TEST_F(DataCaptureTest, IterationCloudUsesNestedIterationDirectory) {
+    DataCapture capture;
+    capture.configure(EnabledParams());
+
+    const auto frame = capture.beginProcessedFrame(1.0, 1.0);
+    capture.saveFrontendIterationCloud(
+        frame, 3, "scan_world", OnePointCloud(), "world");
+    capture.appendFrontendIterationRow(
+        frame, 3, "observation.csv", "value", "42");
+
+    EXPECT_TRUE(std::filesystem::exists(
+        output_dir_ / "frontend" / "frame_000000" /
+        "iteration_03" / "scan_world.pcd"));
+    EXPECT_TRUE(std::filesystem::exists(
+        output_dir_ / "frontend" / "frame_000000" /
+        "iteration_03" / "observation.csv"));
+}
+
 }  // namespace
 }  // namespace lightning

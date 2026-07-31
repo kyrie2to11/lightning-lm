@@ -69,6 +69,9 @@ class DataCapture {
     void saveFrontendCloud(const FrameContext& frame, const std::string& stage,
                            const PointCloudType& cloud, const std::string& coordinate_frame,
                            bool force = false);
+    void saveFrontendIterationCloud(const FrameContext& frame, int iteration,
+                                    const std::string& stage, const PointCloudType& cloud,
+                                    const std::string& coordinate_frame);
     void saveBackendCloud(const std::string& event, const std::string& stage,
                           const PointCloudType& cloud, const std::string& coordinate_frame);
     void saveMapCloud(const std::string& stage, const PointCloudType& cloud,
@@ -76,6 +79,9 @@ class DataCapture {
 
     void appendFrameRow(const FrameContext& frame, const std::string& filename,
                         const std::string& header, const std::string& row, bool force = false);
+    void appendFrontendIterationRow(const FrameContext& frame, int iteration,
+                                    const std::string& filename, const std::string& header,
+                                    const std::string& row);
     void appendBackendRow(const std::string& event, const std::string& filename,
                           const std::string& header, const std::string& row);
     void appendGlobalRow(const std::string& filename, const std::string& header,

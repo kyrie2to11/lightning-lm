@@ -47,10 +47,25 @@ TEST(ImuInitialization, TfAlignedModeUsesConfiguredWorldGravityAndRotation) {
     R_world_imu << 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0;
     process.SetInitialWorldImuRotation(R_world_imu);
 
-    const auto state = RunInit(process, lightning::Vec3d(0.03, 9.81, 0.45));
+    // R_world_imu maps IMU +X to world +Z, so a stationary, consistently
+    // framed accelerometer sample points along IMU +X.
+    const auto state = RunInit(process, lightning::Vec3d(9.81, 0.0, 0.0));
 
     EXPECT_NEAR(state.grav_.x(), 0.0, 1e-9);
     EXPECT_NEAR(state.grav_.y(), 0.0, 1e-9);
     EXPECT_NEAR(state.grav_.z(), -lightning::G_m_s2, 1e-9);
     EXPECT_TRUE(state.rot_.matrix().isApprox(R_world_imu, 1e-9));
+}
+
+TEST(ImuInitialization, ExposesCaptureSnapshotWithoutChangingInitialization) {
+    lightning::ImuProcess process;
+    const lightning::Vec3d acceleration(0.03, 9.81, 0.45);
+    RunInit(process, acceleration);
+
+    const auto snapshot = process.GetInitializationSnapshot();
+
+    EXPECT_GT(snapshot.sample_count, 20);
+    EXPECT_TRUE(snapshot.mean_acc.isApprox(acceleration, 1e-9));
+    EXPECT_TRUE(snapshot.mean_gyr.isApprox(lightning::Vec3d::Zero(), 1e-9));
+    EXPECT_EQ(snapshot.initialized, process.IsIMUInited());
 }

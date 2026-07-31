@@ -1,4 +1,5 @@
 #include <pcl/common/transforms.h>
+#include <pcl_conversions/pcl_conversions.h>
 #include <yaml-cpp/yaml.h>
 #include <algorithm>
 #include <cmath>
@@ -19,6 +20,48 @@
 
 namespace lightning {
 
+namespace {
+
+CloudPtr ConvertRosXyziForCapture(const sensor_msgs::msg::PointCloud2::SharedPtr& msg) {
+    pcl::PointCloud<pcl::PointXYZI> input;
+    pcl::fromROSMsg(*msg, input);
+
+    CloudPtr output(new PointCloudType());
+    output->reserve(input.size());
+    for (const auto& source : input) {
+        PointType point;
+        point.x = source.x;
+        point.y = source.y;
+        point.z = source.z;
+        point.intensity = source.intensity;
+        point.time = 0.0;
+        output->push_back(point);
+    }
+    output->width = static_cast<std::uint32_t>(output->size());
+    output->height = 1;
+    output->is_dense = input.is_dense;
+    return output;
+}
+
+std::string StateCsv(const NavState& state) {
+    const Eigen::Quaterniond q(state.rot_.unit_quaternion());
+    std::ostringstream row;
+    row << std::setprecision(15)
+        << state.timestamp_ << ","
+        << state.pos_.x() << "," << state.pos_.y() << "," << state.pos_.z() << ","
+        << q.w() << "," << q.x() << "," << q.y() << "," << q.z() << ","
+        << state.vel_.x() << "," << state.vel_.y() << "," << state.vel_.z() << ","
+        << state.bg_.x() << "," << state.bg_.y() << "," << state.bg_.z() << ","
+        << state.grav_.x() << "," << state.grav_.y() << "," << state.grav_.z();
+    return row.str();
+}
+
+constexpr const char* kStateCsvHeader =
+    "timestamp,pos_x,pos_y,pos_z,qw,qx,qy,qz,vel_x,vel_y,vel_z,"
+    "bg_x,bg_y,bg_z,grav_x,grav_y,grav_z";
+
+}  // namespace
+
 bool LaserMapping::Init(const std::string &config_yaml) {
     LOG(INFO) << "init laser mapping from " << config_yaml;
     if (!LoadParamsFromYAML(config_yaml)) {
@@ -33,6 +76,9 @@ bool LaserMapping::Init(const std::string &config_yaml) {
     eskf_options.max_iterations_ = fasterlio::NUM_MAX_ITERATIONS;
     eskf_options.epsi_ = 1e-3 * Eigen::Matrix<double, ESKF::state_dim_, 1>::Ones();
     eskf_options.lidar_obs_func_ = [this](NavState &s, ESKF::CustomObservationModel &obs) { ObsModel(s, obs); };
+    eskf_options.iteration_callback_ = [this](const ESKF::IterationInfo& info) {
+        CaptureEskfIteration(info);
+    };
     eskf_options.use_aa_ = use_aa_;
     kf_.Init(eskf_options);
 
@@ -95,7 +141,14 @@ bool LaserMapping::LoadParamsFromYAML(const std::string &yaml_file) {
         preprocess_->SetHeightROI(height_max, height_min);
 
         if (yaml["fasterlio"]["lidar_frame_id"]) {
-            preprocess_->SetExpectedFrame(yaml["fasterlio"]["lidar_frame_id"].as<std::string>());
+            lidar_frame_id_ = yaml["fasterlio"]["lidar_frame_id"].as<std::string>();
+            preprocess_->SetExpectedFrame(lidar_frame_id_);
+        }
+        if (yaml["fasterlio"]["imu_frame_id"]) {
+            imu_frame_id_ = yaml["fasterlio"]["imu_frame_id"].as<std::string>();
+        }
+        if (yaml["fasterlio"]["world_frame_id"]) {
+            world_frame_id_ = yaml["fasterlio"]["world_frame_id"].as<std::string>();
         }
 
         options_.kf_dis_th_ = yaml["fasterlio"]["kf_dis_th"].as<double>();
@@ -319,13 +372,86 @@ bool LaserMapping::Run() {
         }
     }
 
+    if (data_capture_.enabled() && !multibody_cfg_.enabled) {
+        capture_frame_ =
+            data_capture_.beginProcessedFrame(measures_.lidar_begin_time_, measures_.lidar_end_time_);
+        capture_frame_valid_ = true;
+        capture_obs_iteration_ = 0;
+
+        data_capture_.saveFrontendCloud(
+            capture_frame_, "00_lightning_input_from_polka", *current_input_cloud_, lidar_frame_id_);
+        data_capture_.saveFrontendCloud(
+            capture_frame_, "01_preprocessed_lidar", *measures_.scan_, lidar_frame_id_);
+
+        std::ostringstream sync_row;
+        const double first_imu = measures_.imu_.empty() ? 0.0 : measures_.imu_.front()->timestamp;
+        const double last_imu = measures_.imu_.empty() ? 0.0 : measures_.imu_.back()->timestamp;
+        sync_row << std::setprecision(15)
+                 << measures_.lidar_begin_time_ << "," << measures_.lidar_end_time_ << ","
+                 << first_imu << "," << last_imu << "," << measures_.imu_.size() << ","
+                 << lidar_buffer_.size() << "," << imu_buffer_.size();
+        data_capture_.appendFrameRow(
+            capture_frame_, "synchronization.csv",
+            "lidar_begin_time,lidar_end_time,imu_begin_time,imu_end_time,imu_count,"
+            "remaining_lidar_buffer,remaining_imu_buffer",
+            sync_row.str());
+    } else {
+        capture_frame_valid_ = false;
+    }
+
     /// IMU process, kf prediction, undistortion
+    const NavState state_before_imu = kf_.GetX();
+    const ESKF::CovType covariance_before_imu = kf_.GetP();
     p_imu_->Process(measures_, kf_, scan_undistort_, !preprocess_->InputIsPredeskewed());
 
-    // Data capture: deskewed
-    if (data_capture_.enabled()) {
-        data_capture_.startFrame(scan_count_);
-        data_capture_.savePcd("02_deskewed", *scan_undistort_);
+    if (capture_frame_valid_) {
+        const auto append_state = [this](const std::string& phase, const NavState& state,
+                                         const ESKF::CovType& covariance) {
+            std::ostringstream row;
+            row << phase << "," << StateCsv(state);
+            for (int i = 0; i < ESKF::state_dim_; ++i) {
+                row << "," << covariance(i, i);
+            }
+            std::string header = std::string("phase,") + kStateCsvHeader;
+            for (int i = 0; i < ESKF::state_dim_; ++i) {
+                header += ",cov_diag_" + std::to_string(i);
+            }
+            data_capture_.appendFrameRow(capture_frame_, "imu_prediction.csv", header, row.str());
+        };
+        append_state("before_imu_process", state_before_imu, covariance_before_imu);
+        append_state("after_imu_process", kf_.GetX(), kf_.GetP());
+
+        const auto init = p_imu_->GetInitializationSnapshot();
+        const NavState init_state = kf_.GetX();
+        std::ostringstream init_row;
+        init_row << capture_frame_.id << "," << init.sample_count << ","
+                 << (init.initialized ? 1 : 0) << ","
+                 << init.mean_acc.x() << "," << init.mean_acc.y() << "," << init.mean_acc.z() << ","
+                 << init.mean_gyr.x() << "," << init.mean_gyr.y() << "," << init.mean_gyr.z() << ","
+                 << init.cov_acc.x() << "," << init.cov_acc.y() << "," << init.cov_acc.z() << ","
+                 << init.cov_gyr.x() << "," << init.cov_gyr.y() << "," << init.cov_gyr.z() << ","
+                 << init.acceleration_scale << ","
+                 << init_state.bg_.x() << "," << init_state.bg_.y() << "," << init_state.bg_.z() << ","
+                 << init_state.grav_.x() << "," << init_state.grav_.y() << "," << init_state.grav_.z();
+        data_capture_.appendGlobalRow(
+            "imu_initialization.csv",
+            "processed_frame_id,sample_count,initialized,mean_ax,mean_ay,mean_az,"
+            "mean_gx,mean_gy,mean_gz,cov_ax,cov_ay,cov_az,cov_gx,cov_gy,cov_gz,"
+            "acceleration_scale,bg_x,bg_y,bg_z,grav_x,grav_y,grav_z",
+            init_row.str());
+
+        std::ostringstream mode_row;
+        mode_row << "polka_predeskewed," << (preprocess_->InputIsPredeskewed() ? 0 : 1) << ","
+                 << lidar_frame_id_ << "," << imu_frame_id_ << ",imu_from_lidar";
+        data_capture_.appendFrameRow(
+            capture_frame_, "imu_process_mode.csv",
+            "input_mode,pointwise_deskew,lidar_frame,output_frame,extrinsic_direction",
+            mode_row.str());
+
+        if (scan_undistort_) {
+            data_capture_.saveFrontendCloud(
+                capture_frame_, "02_imu_body_cloud", *scan_undistort_, imu_frame_id_);
+        }
     }
 
     if (scan_undistort_->empty() || (scan_undistort_ == nullptr)) {
@@ -343,6 +469,16 @@ bool LaserMapping::Run() {
             PointBodyToWorld(scan_undistort_->points[i], scan_down_world_->points[i]);
         }
         ivox_->AddPoints(scan_down_world_->points);
+        if (capture_frame_valid_) {
+            data_capture_.saveFrontendCloud(
+                capture_frame_, "03_first_scan_world", *scan_down_world_, world_frame_id_);
+            data_capture_.saveFrontendCloud(
+                capture_frame_, "04_ivox_initial_points", *scan_down_world_, world_frame_id_);
+            data_capture_.appendFrameRow(
+                capture_frame_, "map_events.csv", "event,points,ivox_valid_grids",
+                "first_scan_ivox_initialization," + std::to_string(scan_down_world_->size()) + "," +
+                    std::to_string(ivox_->NumValidGrids()));
+        }
 
         first_lidar_time_ = measures_.lidar_end_time_;
         state_point_.timestamp_ = lidar_end_time_;
@@ -410,9 +546,9 @@ bool LaserMapping::Run() {
         return false;
     }
 
-    // Data capture: obs input (downsampled, pre-limit)
-    if (data_capture_.enabled()) {
-        data_capture_.savePcd("03_obs_input_pre_limit", *scan_down_body_);
+    if (capture_frame_valid_) {
+        data_capture_.saveFrontendCloud(
+            capture_frame_, "03_voxel_pre_limit", *scan_down_body_, imu_frame_id_);
     }
 
     // Limit observation points (colleague's max_observation_points)
@@ -426,14 +562,27 @@ bool LaserMapping::Run() {
         cur_pts = options_.max_observation_points;
     }
 
+    if (capture_frame_valid_) {
+        data_capture_.saveFrontendCloud(
+            capture_frame_, "04_observation_input", *scan_down_body_, imu_frame_id_);
+        std::ostringstream row;
+        row << scan_undistort_->size() << "," << cur_pts << ","
+            << options_.max_observation_points;
+        data_capture_.appendFrameRow(
+            capture_frame_, "downsampling.csv",
+            "imu_body_points,observation_points,max_observation_points", row.str());
+    }
+
     scan_down_world_->resize(cur_pts);
     nearest_points_.resize(cur_pts);
 
     // 成员变量预分配
     residuals_.resize(cur_pts, 0);
+    std::fill(residuals_.begin(), residuals_.end(), 0.0F);
     point_selected_surf_.resize(cur_pts, 1);
     point_selected_icp_.resize(cur_pts, 1);
     plane_coef_.resize(cur_pts, Vec4f::Zero());
+    capture_rejection_reason_.resize(cur_pts, 0);
 
     auto pred_state = kf_.GetX();
     // pred_state.pos_ = state_point_.pos_;  // 假定位置不动行不行,防止速度漂移
@@ -444,16 +593,22 @@ bool LaserMapping::Run() {
     state_point_ = kf_.GetX();
     state_point_.timestamp_ = measures_.lidar_end_time_;
 
-    // Data capture: EKF state CSV
-    if (data_capture_.enabled()) {
-        const Mat3d R_w_imu = state_point_.rot_.matrix();
-        double yaw = state_point_.rot_.angleZ<double>() * 180.0 / M_PI;
-        double pitch = asin(std::clamp(-R_w_imu(2, 0), -1.0, 1.0)) * 180.0 / M_PI;
-        double roll = atan2(R_w_imu(2, 1), R_w_imu(2, 2)) * 180.0 / M_PI;
-        Eigen::Quaterniond q(state_point_.rot_.unit_quaternion());
-        data_capture_.appendEkf(0, state_point_.pos_, q, state_point_.vel_,
-                                state_point_.bg_, yaw, pitch, roll,
-                                effect_feat_surf_, 0, 0);
+    if (capture_frame_valid_) {
+        PointCloudType final_world;
+        pcl::transformPointCloud(
+            *scan_down_body_, final_world, state_point_.GetPose().matrix());
+        data_capture_.saveFrontendCloud(
+            capture_frame_, "05_state_updated_world", final_world, world_frame_id_);
+
+        std::ostringstream row;
+        row << StateCsv(pred_state) << "," << StateCsv(state_point_) << ","
+            << kf_.GetIterations() << "," << kf_.GetFinalRes() << ","
+            << effect_feat_surf_ << "," << effect_feat_icp_;
+        data_capture_.appendFrameRow(
+            capture_frame_, "frontend_result.csv",
+            std::string("pred_") + kStateCsvHeader + ",updated_" + kStateCsvHeader +
+                ",iterations,final_residual_ratio,surface_matches,icp_matches",
+            row.str());
     }
 
     const double delta_translation = (pred_state.pos_ - state_point_.pos_).norm();
@@ -480,14 +635,46 @@ bool LaserMapping::Run() {
 
     /// keyframes
     if (last_kf_ == nullptr) {
+        if (capture_frame_valid_) {
+            data_capture_.appendGlobalRow(
+                "keyframe_decisions.csv",
+                "processed_frame_id,timestamp,translation,rotation_deg,translation_threshold,"
+                "rotation_threshold_deg,is_keyframe,reason",
+                std::to_string(capture_frame_.id) + "," + std::to_string(state_point_.timestamp_) +
+                    ",0,0," + std::to_string(options_.kf_dis_th_) + "," +
+                    std::to_string(options_.kf_angle_th_ * 180.0 / M_PI) + ",1,first_keyframe");
+        }
         MakeKF();
     } else {
         SE3 last_pose = last_kf_->GetLIOPose();
         SE3 cur_pose = state_point_.GetPose();
-        if ((last_pose.translation() - cur_pose.translation()).norm() > options_.kf_dis_th_ ||
-            (last_pose.so3().inverse() * cur_pose.so3()).log().norm() > options_.kf_angle_th_) {
+        const double keyframe_translation = (last_pose.translation() - cur_pose.translation()).norm();
+        const double keyframe_rotation =
+            (last_pose.so3().inverse() * cur_pose.so3()).log().norm();
+        const bool motion_keyframe = keyframe_translation > options_.kf_dis_th_ ||
+                                     keyframe_rotation > options_.kf_angle_th_;
+        const bool localization_timeout_keyframe =
+            !options_.is_in_slam_mode_ &&
+            (state_point_.timestamp_ - last_kf_->GetState().timestamp_) > 2.0;
+        if (capture_frame_valid_) {
+            const bool is_keyframe = motion_keyframe || localization_timeout_keyframe;
+            const std::string reason = motion_keyframe
+                                           ? "motion_threshold"
+                                           : (localization_timeout_keyframe ? "localization_timeout" : "below_threshold");
+            std::ostringstream row;
+            row << capture_frame_.id << "," << std::setprecision(15) << state_point_.timestamp_ << ","
+                << keyframe_translation << "," << keyframe_rotation * 180.0 / M_PI << ","
+                << options_.kf_dis_th_ << "," << options_.kf_angle_th_ * 180.0 / M_PI << ","
+                << (is_keyframe ? 1 : 0) << "," << reason;
+            data_capture_.appendGlobalRow(
+                "keyframe_decisions.csv",
+                "processed_frame_id,timestamp,translation,rotation_deg,translation_threshold,"
+                "rotation_threshold_deg,is_keyframe,reason",
+                row.str());
+        }
+        if (motion_keyframe) {
             MakeKF();
-        } else if (!options_.is_in_slam_mode_ && (state_point_.timestamp_ - last_kf_->GetState().timestamp_) > 2.0) {
+        } else if (localization_timeout_keyframe) {
             MakeKF();
         } else if ((last_pose.so3().inverse() * cur_pose.so3()).log().norm() > 1.0 * M_PI / 180.0) {
             // MapIncremental();
@@ -563,11 +750,6 @@ void LaserMapping::ProjectKFs(CloudPtr cloud, int size_limit) {
 void LaserMapping::MakeKF() {
     Keyframe::Ptr kf = std::make_shared<Keyframe>(kf_id_++, scan_undistort_, state_point_);
 
-    if (data_capture_.enabled()) {
-        data_capture_.savePcd("04_kf_cloud", *scan_undistort_);
-        data_capture_.flush();
-    }
-
     if (last_kf_) {
         /// opt pose 用之前的递推
         SE3 delta = last_kf_->GetLIOPose().inverse() * kf->GetLIOPose();
@@ -577,6 +759,35 @@ void LaserMapping::MakeKF() {
     }
 
     kf->SetState(state_point_);
+
+    if (capture_frame_valid_) {
+        const bool force = data_capture_.params().capture_all_keyframes;
+        data_capture_.saveFrontendCloud(
+            capture_frame_, "07_keyframe_body", *kf->GetCloud(), imu_frame_id_, force);
+        PointCloudType keyframe_world;
+        pcl::transformPointCloud(
+            *kf->GetCloud(), keyframe_world, kf->GetLIOPose().matrix());
+        data_capture_.saveFrontendCloud(
+            capture_frame_, "08_keyframe_world_lio", keyframe_world, world_frame_id_, force);
+
+        const Eigen::Quaterniond lio_q(kf->GetLIOPose().so3().unit_quaternion());
+        const Eigen::Quaterniond opt_q(kf->GetOptPose().so3().unit_quaternion());
+        std::ostringstream row;
+        row << capture_frame_.id << "," << kf->GetID() << "," << std::setprecision(15)
+            << state_point_.timestamp_ << ","
+            << kf->GetLIOPose().translation().transpose() << ","
+            << lio_q.w() << "," << lio_q.x() << "," << lio_q.y() << "," << lio_q.z() << ","
+            << kf->GetOptPose().translation().transpose() << ","
+            << opt_q.w() << "," << opt_q.x() << "," << opt_q.y() << "," << opt_q.z();
+        std::string csv_row = row.str();
+        std::replace(csv_row.begin(), csv_row.end(), ' ', ',');
+        data_capture_.appendGlobalRow(
+            "keyframes.csv",
+            "processed_frame_id,keyframe_id,timestamp,"
+            "lio_x,lio_y,lio_z,lio_qw,lio_qx,lio_qy,lio_qz,"
+            "opt_x,opt_y,opt_z,opt_qw,opt_qx,opt_qy,opt_qz",
+            csv_row);
+    }
 
     LOG(INFO) << "LIO: create kf " << kf->GetID() << ", state: " << state_point_.pos_.transpose()
               << ", kf opt pose: " << kf->GetOptPose().translation().transpose()
@@ -622,6 +833,13 @@ void LaserMapping::ProcessPointCloud2(const sensor_msgs::msg::PointCloud2::Share
             if (timestamp <= last_timestamp_lidar_) {
                 LOG_EVERY_N(WARNING, 100)
                     << "ignore non-increasing lidar timestamp, dt: " << timestamp - last_timestamp_lidar_;
+                if (data_capture_.enabled()) {
+                    std::ostringstream row;
+                    row << std::setprecision(15) << timestamp << ",lidar_rejected,non_increasing_timestamp,"
+                        << last_timestamp_lidar_;
+                    data_capture_.appendGlobalRow(
+                        "input_events.csv", "timestamp,event,reason,reference_timestamp", row.str());
+                }
                 return;
             }
 
@@ -631,6 +849,14 @@ void LaserMapping::ProcessPointCloud2(const sensor_msgs::msg::PointCloud2::Share
             CloudPtr cloud(new PointCloudType());
             preprocess_->Process(msg, cloud);
 
+            if (data_capture_.enabled()) {
+                try {
+                    lidar_input_buffer_.push_back(ConvertRosXyziForCapture(msg));
+                } catch (const std::exception& e) {
+                    LOG(ERROR) << "DataCapture failed to convert Polka input: " << e.what();
+                    lidar_input_buffer_.push_back(cloud);
+                }
+            }
             lidar_buffer_.push_back(cloud);
             time_buffer_.push_back(timestamp);
             last_timestamp_lidar_ = timestamp;
@@ -695,6 +921,13 @@ double LaserMapping::ComputeLidarEndTime(double begin_time, const PointCloudType
 bool LaserMapping::SyncPackages() {
     if (lidar_buffer_.empty() || imu_buffer_.empty()) {
         LOG(INFO) << "lidar or imu is empty";
+        if (data_capture_.enabled()) {
+            std::ostringstream row;
+            row << std::setprecision(15) << last_timestamp_lidar_
+                << ",sync_wait,empty_buffer," << lidar_buffer_.size() << "," << imu_buffer_.size();
+            data_capture_.appendGlobalRow(
+                "sync_events.csv", "timestamp,event,reason,lidar_buffer_size,imu_buffer_size", row.str());
+        }
         return false;
     }
 
@@ -732,6 +965,13 @@ bool LaserMapping::SyncPackages() {
 
     if (last_timestamp_imu_ < lidar_end_time_) {
         LOG(INFO) << "sync failed: " << std::setprecision(14) << last_timestamp_imu_ << ", " << lidar_end_time_;
+        if (data_capture_.enabled()) {
+            std::ostringstream row;
+            row << std::setprecision(15) << lidar_end_time_
+                << ",sync_wait,imu_coverage," << lidar_buffer_.size() << "," << imu_buffer_.size();
+            data_capture_.appendGlobalRow(
+                "sync_events.csv", "timestamp,event,reason,lidar_buffer_size,imu_buffer_size", row.str());
+        }
         return false;
     }
 
@@ -749,6 +989,12 @@ bool LaserMapping::SyncPackages() {
         imu_buffer_.pop_front();
     }
 
+    if (data_capture_.enabled() && !lidar_input_buffer_.empty()) {
+        current_input_cloud_ = lidar_input_buffer_.front();
+        lidar_input_buffer_.pop_front();
+    } else {
+        current_input_cloud_ = measures_.scan_;
+    }
     lidar_buffer_.pop_front();
     time_buffer_.pop_front();
     lidar_pushed_ = false;
@@ -970,6 +1216,28 @@ void LaserMapping::MapIncremental() {
             ivox_->AddPoints(point_no_need_downsample);
         },
         "    IVox Add Points");
+
+    if (capture_frame_valid_) {
+        PointCloudType added;
+        added.reserve(points_to_add.size() + point_no_need_downsample.size());
+        for (const auto& point : points_to_add) added.push_back(point);
+        for (const auto& point : point_no_need_downsample) added.push_back(point);
+        added.width = static_cast<std::uint32_t>(added.size());
+        added.height = 1;
+        added.is_dense = false;
+
+        const bool force = data_capture_.params().capture_all_keyframes;
+        data_capture_.saveFrontendCloud(
+            capture_frame_, "06_ivox_points_added", added, world_frame_id_, force);
+        std::ostringstream row;
+        row << scan_down_body_->size() << "," << points_to_add.size() << ","
+            << point_no_need_downsample.size() << "," << added.size() << ","
+            << ivox_->NumValidGrids();
+        data_capture_.appendFrameRow(
+            capture_frame_, "ivox_incremental.csv",
+            "candidate_points,voxel_checked_added,no_downsample_added,total_added,valid_grids",
+            row.str(), force);
+    }
 }
 
 /**
@@ -1010,6 +1278,7 @@ void LaserMapping::ObsModel(NavState &s, ESKF::CustomObservationModel &obs) {
                 /** Find the closest surfaces in the map **/
                 ivox_->GetClosestPoint(point_world, points_near, fasterlio::NUM_MATCH_POINTS);
                 point_selected_surf_[i] = points_near.size() >= fasterlio::MIN_NUM_MATCH_POINTS;
+                capture_rejection_reason_[i] = point_selected_surf_[i] ? 0 : 1;
 
                 point_selected_icp_[i] = point_selected_surf_[i];
 
@@ -1017,6 +1286,9 @@ void LaserMapping::ObsModel(NavState &s, ESKF::CustomObservationModel &obs) {
                 if (point_selected_surf_[i]) {
                     point_selected_surf_[i] =
                         math::esti_plane(plane_coef_[i], points_near, fasterlio::ESTI_PLANE_THRESHOLD);
+                    if (!point_selected_surf_[i]) {
+                        capture_rejection_reason_[i] = 2;
+                    }
                 }
 
                 /// 计算平面阈值
@@ -1030,6 +1302,7 @@ void LaserMapping::ObsModel(NavState &s, ESKF::CustomObservationModel &obs) {
                         residuals_[i] = pd2;
                     } else {
                         point_selected_surf_[i] = false;
+                        capture_rejection_reason_[i] = 3;
                     }
                 }
             });
@@ -1057,6 +1330,59 @@ void LaserMapping::ObsModel(NavState &s, ESKF::CustomObservationModel &obs) {
 
     corr_pts_.resize(effect_feat_surf_);
     corr_norm_.resize(effect_feat_surf_);
+    obs.effective_feature_count_ = effect_feat_surf_;
+
+    if (capture_frame_valid_ && capture_frame_.sampled &&
+        data_capture_.shouldCaptureIteration(obs.iteration_)) {
+        PointCloudType accepted_world;
+        PointCloudType rejected_world;
+        PointCloudType accepted_neighbors;
+        accepted_world.reserve(effect_feat_surf_);
+        rejected_world.reserve(cnt_pts - effect_feat_surf_);
+
+        std::ostringstream correspondences;
+        for (int i = 0; i < cnt_pts; ++i) {
+            const bool accepted = point_selected_surf_[i];
+            if (accepted) {
+                accepted_world.push_back(scan_down_world_->points[i]);
+                for (const auto& neighbor : nearest_points_[i]) {
+                    accepted_neighbors.push_back(neighbor);
+                }
+            } else {
+                rejected_world.push_back(scan_down_world_->points[i]);
+            }
+
+            const auto& body = scan_down_body_->points[i];
+            const auto& world = scan_down_world_->points[i];
+            correspondences << i << "," << (accepted ? 1 : 0) << ","
+                            << capture_rejection_reason_[i] << ","
+                            << body.x << "," << body.y << "," << body.z << ","
+                            << world.x << "," << world.y << "," << world.z << ","
+                            << residuals_[i] << ","
+                            << plane_coef_[i].x() << "," << plane_coef_[i].y() << ","
+                            << plane_coef_[i].z() << "," << plane_coef_[i].w() << "\n";
+        }
+        accepted_world.width = static_cast<std::uint32_t>(accepted_world.size());
+        accepted_world.height = 1;
+        rejected_world.width = static_cast<std::uint32_t>(rejected_world.size());
+        rejected_world.height = 1;
+        accepted_neighbors.width = static_cast<std::uint32_t>(accepted_neighbors.size());
+        accepted_neighbors.height = 1;
+
+        data_capture_.saveFrontendIterationCloud(
+            capture_frame_, obs.iteration_, "scan_world", *scan_down_world_, world_frame_id_);
+        data_capture_.saveFrontendIterationCloud(
+            capture_frame_, obs.iteration_, "accepted_source_world", accepted_world, world_frame_id_);
+        data_capture_.saveFrontendIterationCloud(
+            capture_frame_, obs.iteration_, "rejected_source_world", rejected_world, world_frame_id_);
+        data_capture_.saveFrontendIterationCloud(
+            capture_frame_, obs.iteration_, "accepted_neighbors_world", accepted_neighbors, world_frame_id_);
+        data_capture_.appendFrontendIterationRow(
+            capture_frame_, obs.iteration_, "correspondences.csv",
+            "point_index,accepted,rejection_reason,body_x,body_y,body_z,"
+            "world_x,world_y,world_z,residual,plane_a,plane_b,plane_c,plane_d",
+            correspondences.str());
+    }
 
     if (effect_feat_surf_ < 20) {
         obs.valid_ = false;
@@ -1166,6 +1492,41 @@ void LaserMapping::ObsModel(NavState &s, ESKF::CustomObservationModel &obs) {
             obs.HTr_ += JTr[i] * options_.icp_weight_;
         }
     }
+}
+
+void LaserMapping::CaptureEskfIteration(const ESKF::IterationInfo& info) {
+    if (!capture_frame_valid_ || !capture_frame_.sampled ||
+        !data_capture_.shouldCaptureIteration(info.iteration)) {
+        return;
+    }
+
+    std::ostringstream row;
+    row << info.iteration << "," << (info.valid ? 1 : 0) << ","
+        << (info.accepted ? 1 : 0) << "," << (info.converged ? 1 : 0) << ","
+        << info.effective_feature_count << "," << info.observable_rank << ","
+        << info.residual_mean << "," << info.residual_max << ","
+        << StateCsv(info.state_before) << "," << StateCsv(info.state_after);
+    for (int i = 0; i < ESKF::state_dim_; ++i) row << "," << info.increment(i);
+    for (int i = 0; i < ESKF::pose_obs_dim_; ++i) row << "," << info.eigenvalues(i);
+    for (int r = 0; r < ESKF::pose_obs_dim_; ++r) {
+        for (int c = 0; c < ESKF::pose_obs_dim_; ++c) row << "," << info.hth(r, c);
+    }
+    for (int i = 0; i < ESKF::pose_obs_dim_; ++i) row << "," << info.htr(i);
+
+    std::string header =
+        std::string("iteration,valid,accepted,converged,effective_features,observable_rank,")
+        + "residual_mean,residual_max,before_" + kStateCsvHeader + ",after_" + kStateCsvHeader;
+    for (int i = 0; i < ESKF::state_dim_; ++i) header += ",dx_" + std::to_string(i);
+    for (int i = 0; i < ESKF::pose_obs_dim_; ++i) header += ",eigenvalue_" + std::to_string(i);
+    for (int r = 0; r < ESKF::pose_obs_dim_; ++r) {
+        for (int c = 0; c < ESKF::pose_obs_dim_; ++c) {
+            header += ",hth_" + std::to_string(r) + "_" + std::to_string(c);
+        }
+    }
+    for (int i = 0; i < ESKF::pose_obs_dim_; ++i) header += ",htr_" + std::to_string(i);
+
+    data_capture_.appendFrameRow(
+        capture_frame_, "state_iterations.csv", header, row.str());
 }
 
 ///////////////////////////  private method /////////////////////////////////////////////////////////////////////

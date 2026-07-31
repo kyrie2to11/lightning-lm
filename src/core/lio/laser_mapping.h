@@ -114,6 +114,7 @@ class LaserMapping {
     }
     const Vec3d &GetExtrinsicTranslation() const { return offset_t_lidar_fixed_; }
     const Mat3d &GetExtrinsicRotation() const { return offset_R_lidar_fixed_; }
+    bool GetInputIsPredeskewed() const { return preprocess_->InputIsPredeskewed(); }
 
     /// 获取关键帧
     Keyframe::Ptr GetKeyframe() const { return last_kf_; }
@@ -158,6 +159,7 @@ class LaserMapping {
     bool SyncPackagesMultiBody();
 
     void ObsModel(NavState &s, ESKF::CustomObservationModel &obs);
+    void CaptureEskfIteration(const ESKF::IterationInfo& info);
 
     inline void PointBodyToWorld(const PointType &pi, PointType &po) {
         // Points are in IMU body frame — no LiDAR-IMU extrinsic needed.
@@ -219,6 +221,7 @@ class LaserMapping {
     std::vector<float> residuals_;             // point-to-plane residuals
     std::vector<char> point_selected_surf_;    // selected points
     std::vector<Vec4f> plane_coef_;            // plane coeffs
+    std::vector<int> capture_rejection_reason_;  // capture-only: 0 accepted, 1 neighbor, 2 plane, 3 residual
 
     /// 点到点相关
     std::vector<char> point_selected_icp_;  // 点到点的selected points
@@ -227,7 +230,16 @@ class LaserMapping {
     std::deque<double> time_buffer_;
 
     std::deque<PointCloudType::Ptr> lidar_buffer_;
+    std::deque<PointCloudType::Ptr> lidar_input_buffer_;
     std::deque<lightning::IMUPtr> imu_buffer_;
+    CloudPtr current_input_cloud_{new PointCloudType()};
+
+    DataCapture::FrameContext capture_frame_;
+    bool capture_frame_valid_ = false;
+    int capture_obs_iteration_ = 0;
+    std::string lidar_frame_id_ = "lidar";
+    std::string imu_frame_id_ = "imu";
+    std::string world_frame_id_ = "world";
 
     /// options
     bool keep_first_imu_estimation_ = false;  // 在没有建立地图前，是否要使用前几帧的IMU状态

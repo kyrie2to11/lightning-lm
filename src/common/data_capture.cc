@@ -98,6 +98,19 @@ void DataCapture::saveFrontendCloud(const FrameContext& frame, const std::string
               frame.lidar_begin_time, frame.lidar_end_time);
 }
 
+void DataCapture::saveFrontendIterationCloud(const FrameContext& frame, int iteration,
+                                             const std::string& stage, const PointCloudType& cloud,
+                                             const std::string& coordinate_frame) {
+    if (!params_.enabled || !params_.frontend_enabled || !frame.sampled ||
+        !shouldCaptureIteration(iteration)) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    SaveCloud(
+        FrontendDirectory(frame.id) / ("iteration_" + PaddedId(iteration).substr(4)),
+        stage, cloud, coordinate_frame, frame.lidar_begin_time, frame.lidar_end_time);
+}
+
 void DataCapture::saveBackendCloud(const std::string& event, const std::string& stage,
                                    const PointCloudType& cloud, const std::string& coordinate_frame) {
     if (!params_.enabled || !params_.backend_enabled) {
@@ -123,6 +136,19 @@ void DataCapture::appendFrameRow(const FrameContext& frame, const std::string& f
     }
     std::lock_guard<std::mutex> lock(mutex_);
     AppendRow(FrontendDirectory(frame.id) / SafeComponent(filename), header, row);
+}
+
+void DataCapture::appendFrontendIterationRow(const FrameContext& frame, int iteration,
+                                             const std::string& filename, const std::string& header,
+                                             const std::string& row) {
+    if (!params_.enabled || !params_.frontend_enabled || !frame.sampled ||
+        !shouldCaptureIteration(iteration)) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto directory =
+        FrontendDirectory(frame.id) / ("iteration_" + PaddedId(iteration).substr(4));
+    AppendRow(directory / SafeComponent(filename), header, row);
 }
 
 void DataCapture::appendBackendRow(const std::string& event, const std::string& filename,

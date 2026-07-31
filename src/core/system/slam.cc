@@ -18,6 +18,7 @@
 #include <yaml-cpp/yaml.h>
 #include <filesystem>
 #include <chrono>
+#include <sstream>
 #include <thread>
 #include <opencv2/opencv.hpp>
 
@@ -38,12 +39,29 @@ bool SlamSystem::Init(const std::string& yaml_path) {
     auto yaml = YAML::LoadFile(yaml_path);
 
     // Data capture config
-    if (yaml["data_capture"] && yaml["data_capture"]["enabled"].as<bool>()) {
+    if (yaml["data_capture"] && yaml["data_capture"]["enabled"].as<bool>(false)) {
+        const auto capture = yaml["data_capture"];
         DataCapture::Params dp;
         dp.enabled = true;
-        dp.output_dir = yaml["data_capture"]["output_dir"].as<std::string>();
+        dp.output_dir = capture["output_dir"].as<std::string>("/tmp/lightning_capture");
+        dp.every_n_frames = capture["every_n_frames"].as<int>(1);
+        dp.frame_start = capture["frame_start"].as<std::int64_t>(0);
+        dp.frame_end = capture["frame_end"].as<std::int64_t>(-1);
+        dp.eskf_iteration_stride = capture["eskf_iteration_stride"].as<int>(1);
+        dp.imu_sample_stride = capture["imu_sample_stride"].as<int>(1);
+        dp.frontend_enabled = capture["frontend_enabled"].as<bool>(true);
+        dp.frontend_iterations_enabled = capture["frontend_iterations_enabled"].as<bool>(true);
+        dp.backend_enabled = capture["backend_enabled"].as<bool>(true);
+        dp.map_output_enabled = capture["map_output_enabled"].as<bool>(true);
+        dp.capture_all_keyframes = capture["capture_all_keyframes"].as<bool>(true);
+        dp.capture_all_loop_candidates = capture["capture_all_loop_candidates"].as<bool>(true);
+        dp.capture_all_pgo_events = capture["capture_all_pgo_events"].as<bool>(true);
+        dp.capture_ivox_snapshot = capture["capture_ivox_snapshot"].as<bool>(false);
+        dp.binary_compressed = capture["binary_compressed"].as<bool>(true);
+        dp.max_points_per_cloud = capture["max_points_per_cloud"].as<std::size_t>(0);
         lio_->data_capture_.configure(dp);
-        LOG(INFO) << "Data capture enabled: " << dp.output_dir;
+        LOG(INFO) << "Data capture enabled: " << dp.output_dir
+                  << ", every_n_frames=" << dp.every_n_frames;
     }
 
     options_.with_loop_closing_ = yaml["system"]["with_loop_closing"].as<bool>();
@@ -153,6 +171,31 @@ bool SlamSystem::Init(const std::string& yaml_path) {
                                          SaveMapService::Response::SharedPtr res) { SaveMap(req, res); });
 
         LOG(INFO) << "online slam node has been created.";
+    }
+
+    if (lio_->data_capture_.enabled()) {
+        const auto fasterlio = yaml["fasterlio"];
+        std::ostringstream runtime;
+        runtime << "config_file: " << yaml_path << "\n"
+                << "pipeline: polka_merged_single_body\n"
+                << "lidar_frame: " << fasterlio["lidar_frame_id"].as<std::string>("unknown") << "\n"
+                << "imu_frame: " << fasterlio["imu_frame_id"].as<std::string>("unknown") << "\n"
+                << "world_frame: " << fasterlio["world_frame_id"].as<std::string>("world") << "\n"
+                << "pointwise_deskew: "
+                << (lio_->GetInputIsPredeskewed() ? "false" : "true") << "\n"
+                << "extrinsic_direction: imu_from_lidar\n"
+                << "extrinsic_translation: [" << lio_->GetExtrinsicTranslation().transpose() << "]\n"
+                << "extrinsic_rotation_row_major: [";
+        const Mat3d& rotation = lio_->GetExtrinsicRotation();
+        for (int row = 0; row < 3; ++row) {
+            for (int col = 0; col < 3; ++col) {
+                if (row != 0 || col != 0) runtime << ", ";
+                runtime << rotation(row, col);
+            }
+        }
+        runtime << "]\n"
+                << "loop_closing_enabled: " << (options_.with_loop_closing_ ? "true" : "false") << "\n";
+        lio_->data_capture_.writeRunMetadata(runtime.str());
     }
 
     return true;

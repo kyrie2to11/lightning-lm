@@ -125,6 +125,31 @@ void ESKF::Update(ESKF::ObsType obs, const double& R) {
     update_num += 1;
     for (int i = -1; i < maximum_iter_; i++) {
         custom_obs_model_.valid_ = true;
+        custom_obs_model_.iteration_ = i + 1;
+        custom_obs_model_.effective_feature_count_ = 0;
+        const NavState iteration_state_before = x_;
+
+        auto report_iteration = [&](bool valid, bool accepted, bool converged,
+                                    int observable_rank, const Vec6d& eigenvalues,
+                                    const StateVecType& increment) {
+            if (!iteration_callback_) return;
+            IterationInfo info;
+            info.iteration = custom_obs_model_.iteration_;
+            info.valid = valid;
+            info.accepted = accepted;
+            info.converged = converged;
+            info.effective_feature_count = custom_obs_model_.effective_feature_count_;
+            info.observable_rank = observable_rank;
+            info.residual_mean = custom_obs_model_.lidar_residual_mean_;
+            info.residual_max = custom_obs_model_.lidar_residual_max_;
+            info.state_before = iteration_state_before;
+            info.state_after = x_;
+            info.increment = increment;
+            info.eigenvalues = eigenvalues;
+            info.hth = custom_obs_model_.HTH_;
+            info.htr = custom_obs_model_.HTr_;
+            iteration_callback_(info);
+        };
 
         /// 计算observation function，主要是residual_, h_x_, s_
         /// x_ 在每次迭代中都是更新的，线性化点也会更新
@@ -141,6 +166,7 @@ void ESKF::Update(ESKF::ObsType obs, const double& R) {
         }
 
         if (custom_obs_model_.valid_ == false) {
+            report_iteration(false, false, false, 0, Vec6d::Zero(), StateVecType::Zero());
             x_ = last_x;
             P_ = P_propagated;
             return;
@@ -148,6 +174,7 @@ void ESKF::Update(ESKF::ObsType obs, const double& R) {
 
         if (use_aa_ && i > -1 && (obs == ObsType::LIDAR || obs == ObsType::WHEEL_SPEED_AND_LIDAR) &&
             custom_obs_model_.lidar_residual_mean_ >= last_lidar_res * 1.01) {
+            report_iteration(true, false, false, 0, Vec6d::Zero(), StateVecType::Zero());
             x_ = last_x;
             break;
         }
@@ -199,6 +226,7 @@ void ESKF::Update(ESKF::ObsType obs, const double& R) {
         Eigen::SelfAdjointEigenSolver<Mat6d> eigen_solver(HTH_sym);
         if (eigen_solver.info() != Eigen::Success) {
             LOG(WARNING) << "Failed to decompose ESKF observation information matrix.";
+            report_iteration(true, false, false, 0, Vec6d::Zero(), StateVecType::Zero());
             continue;
         }
 
@@ -271,6 +299,7 @@ void ESKF::Update(ESKF::ObsType obs, const double& R) {
             dx_rotation_deg > options_.max_update_rotation_step_deg_) {
             LOG(ERROR) << "Reject ESKF iter update, dtrans: " << dx_translation << ", drot_deg: " << dx_rotation_deg
                        << ", dvel: " << dx_current.segment<NavState::kBlockDim>(NavState::kVelIdx).norm();
+            report_iteration(true, false, false, pose_obs_dim_ - nullity, eigen_values, dx_current);
             x_ = start_x;
             P_ = P_propagated;
             return;
@@ -348,8 +377,13 @@ void ESKF::Update(ESKF::ObsType obs, const double& R) {
                 P_.block<pose_obs_dim_, pose_obs_dim_>(0, 0) *= options_.degeneracy_cov_inflation_;
             }
 
+            report_iteration(true, true, custom_obs_model_.converge_,
+                             pose_obs_dim_ - nullity, eigen_values, dx_current);
             break;
         }
+
+        report_iteration(true, true, custom_obs_model_.converge_,
+                         pose_obs_dim_ - nullity, eigen_values, dx_current);
     }
 
     SymmetrizeAndFloorCovariance(P_, options_.min_cov_diag_);

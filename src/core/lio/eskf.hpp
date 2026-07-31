@@ -51,17 +51,40 @@ class ESKF {
     struct CustomObservationModel {
         bool valid_ = true;
         bool converge_ = true;
+        int iteration_ = 0;
+        int effective_feature_count_ = 0;
 
         Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic> R_;  // R 阵，观测噪声
 
         /// NOTE 我们还是传H^T H 比较好，光传一个H会因为残差维度不对导致没法融合各类残差
         /// 这个只需累加即可
-        Eigen::Matrix<double, pose_obs_dim_, pose_obs_dim_> HTH_;
-        Eigen::Matrix<double, pose_obs_dim_, 1> HTr_;
+        Eigen::Matrix<double, pose_obs_dim_, pose_obs_dim_> HTH_ =
+            Eigen::Matrix<double, pose_obs_dim_, pose_obs_dim_>::Zero();
+        Eigen::Matrix<double, pose_obs_dim_, 1> HTr_ =
+            Eigen::Matrix<double, pose_obs_dim_, 1>::Zero();
 
         double lidar_residual_mean_ = 0;
         double lidar_residual_max_ = 0;
     };
+
+    struct IterationInfo {
+        int iteration = 0;
+        bool valid = false;
+        bool accepted = false;
+        bool converged = false;
+        int effective_feature_count = 0;
+        int observable_rank = 0;
+        double residual_mean = 0.0;
+        double residual_max = 0.0;
+        NavState state_before;
+        NavState state_after;
+        StateVecType increment = StateVecType::Zero();
+        Vec6d eigenvalues = Vec6d::Zero();
+        Mat6d hth = Mat6d::Zero();
+        Vec6d htr = Vec6d::Zero();
+    };
+
+    using IterationCallback = std::function<void(const IterationInfo&)>;
 
     /// 用户定义的观测模型函数，根据状态计算观测量和雅可比矩阵
     using CustomObsFunction = std::function<void(NavState& s, CustomObservationModel& obs)>;
@@ -72,6 +95,7 @@ class ESKF {
         CustomObsFunction acc_as_gravity_obs_func_;  // 加计观测函数
         CustomObsFunction gps_obs_func_;
         CustomObsFunction bias_obs_func_;
+        IterationCallback iteration_callback_;
         int max_iterations_ = 4;
         StateVecType epsi_;    // 收敛条件
         bool use_aa_ = false;  // use anderson accleration
@@ -96,6 +120,7 @@ class ESKF {
         acc_as_gravity_obs_func_ = options.acc_as_gravity_obs_func_;
         gps_obs_func_ = options.gps_obs_func_;
         bias_obs_func_ = options.bias_obs_func_;
+        iteration_callback_ = options.iteration_callback_;
         maximum_iter_ = options.max_iterations_;
         limit_ = options.epsi_;
         use_aa_ = options.use_aa_;
@@ -136,6 +161,7 @@ class ESKF {
 
     CustomObservationModel custom_obs_model_;
     CustomObsFunction lidar_obs_func_, wheelspeed_obs_func_, acc_as_gravity_obs_func_, gps_obs_func_, bias_obs_func_;
+    IterationCallback iteration_callback_;
 
     int maximum_iter_ = 0;  // 最大迭代次数
     StateVecType limit_;

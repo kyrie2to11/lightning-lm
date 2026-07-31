@@ -102,6 +102,12 @@ if(BUILD_TESTING)
             ${PROJECT_NAME}.libs
             ${third_party_libs}
             ${PCL_LIBRARIES})
+
+    ament_add_gtest(test_eskf_iteration_capture
+            ${PROJECT_SOURCE_DIR}/test/test_eskf_iteration_capture.cc)
+    target_link_libraries(test_eskf_iteration_capture
+            ${PROJECT_NAME}.libs
+            ${third_party_libs})
 endif()
 
 add_subdirectory(app)
