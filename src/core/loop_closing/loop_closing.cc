@@ -331,11 +331,6 @@ void LoopClosing::PoseOptimization() {
         LOG(INFO) << "loop outliers: " << cnt_outliers << "/" << edge_loops_.size();
     }
 
-    if (cnt_outliers > 0) {
-        optimizer_->InitializeOptimization();
-        optimizer_->Optimize(20);
-    }
-
     /// get results
     for (auto& vert : kf_vert_) {
         SE3 pose = vert->Estimate();
