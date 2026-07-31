@@ -1,6 +1,7 @@
 add_library(${PROJECT_NAME}.libs SHARED
         common/nav_state.cc
         common/constant.h
+        common/data_capture.cc
         common/options.cc
         common/params.cc
 
@@ -94,6 +95,13 @@ if(BUILD_TESTING)
     target_link_libraries(test_imu_initialization
             ${PROJECT_NAME}.libs
             ${third_party_libs})
+
+    ament_add_gtest(test_data_capture
+            ${PROJECT_SOURCE_DIR}/test/test_data_capture.cc)
+    target_link_libraries(test_data_capture
+            ${PROJECT_NAME}.libs
+            ${third_party_libs}
+            ${PCL_LIBRARIES})
 endif()
 
 add_subdirectory(app)

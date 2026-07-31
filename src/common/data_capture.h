@@ -3,114 +3,119 @@
 #ifndef LIGHTNING_DATA_CAPTURE_H
 #define LIGHTNING_DATA_CAPTURE_H
 
-#include <pcl/io/pcd_io.h>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <mutex>
 #include <string>
+
+#include "common/eigen_types.h"
 #include "common/point_def.h"
 
 namespace lightning {
 
-/// Lightweight pipeline data capture for offline debugging.
-/// Inspired by colleague's fast_lio_multi_ros2 DataCapture.
+/// Thread-safe filesystem recorder for the active single-body SLAM pipeline.
 ///
-/// Output structure:
-///   {output_dir}/
-///   ├── ekf.csv
-///   ├── imu.csv
-///   └── frame_NNNNNN/
-///       ├── 01_raw.pcd            — raw scan (after preprocess)
-///       ├── 02_deskewed.pcd       — after IMU deskew
-///       ├── 03_merged.pcd         — after non-leader merge (multibody only)
-///       ├── 04_obs_input.pcd      — after voxel downsample
-///       └── 05_kf_cloud.pcd       — keyframe cloud (on keyframe creation)
+/// Frontend artifacts are addressed by immutable processed-frame IDs. Backend
+/// artifacts are addressed by immutable event names, so the asynchronous loop
+/// closing thread never depends on mutable frontend state.
 class DataCapture {
    public:
     struct Params {
         bool enabled = false;
         std::string output_dir;
-        bool raw = true;
-        bool deskewed = true;
-        bool merged = true;
-        bool obs_input = true;
-        bool kf_cloud = true;
-        bool csv_ekf = true;
-        bool csv_imu = true;
+
+        int every_n_frames = 1;
+        std::int64_t frame_start = 0;
+        std::int64_t frame_end = -1;
+        int eskf_iteration_stride = 1;
+        int imu_sample_stride = 1;
+
+        bool frontend_enabled = true;
+        bool frontend_iterations_enabled = true;
+        bool backend_enabled = true;
+        bool map_output_enabled = true;
+        bool capture_all_keyframes = true;
+        bool capture_all_loop_candidates = true;
+        bool capture_all_pgo_events = true;
+        bool capture_ivox_snapshot = false;
+
+        bool binary_compressed = true;
+        std::size_t max_points_per_cloud = 0;
+    };
+
+    struct FrameContext {
+        std::uint64_t id = 0;
+        double lidar_begin_time = 0.0;
+        double lidar_end_time = 0.0;
+        bool sampled = false;
     };
 
     DataCapture() = default;
+    ~DataCapture();
 
-    void configure(const Params& p) {
-        params_ = p;
-        if (params_.enabled && !params_.output_dir.empty()) {
-            std::filesystem::create_directories(params_.output_dir);
-            if (params_.csv_ekf) {
-                ekf_csv_.open(params_.output_dir + "/ekf.csv");
-                ekf_csv_ << "frame,iter,pos_x,pos_y,pos_z,qw,qx,qy,qz,"
-                         << "vel_x,vel_y,vel_z,bg_x,bg_y,bg_z,"
-                         << "yaw_deg,pitch_deg,roll_deg,"
-                         << "match_pts,residual_mean,residual_max\n";
-            }
-            if (params_.csv_imu) {
-                imu_csv_.open(params_.output_dir + "/imu.csv");
-                imu_csv_ << "timestamp,ax,ay,az,gx,gy,gz\n";
-            }
-        }
-    }
+    DataCapture(const DataCapture&) = delete;
+    DataCapture& operator=(const DataCapture&) = delete;
+
+    void configure(const Params& params);
 
     bool enabled() const { return params_.enabled; }
     const Params& params() const { return params_; }
 
-    void startFrame(int frame_id) {
-        frame_id_ = frame_id;
-        if (params_.enabled) {
-            frame_dir_ = params_.output_dir + "/frame_" + std::to_string(frame_id);
-            std::filesystem::create_directories(frame_dir_);
-        }
-    }
+    FrameContext beginProcessedFrame(double lidar_begin_time, double lidar_end_time);
+    bool shouldCaptureFrame(std::uint64_t frame_id) const;
+    bool shouldCaptureIteration(int iteration) const;
 
-    void savePcd(const std::string& stage, const PointCloudType& cloud) {
-        if (!params_.enabled || frame_dir_.empty()) return;
-        pcl::io::savePCDFileBinary(frame_dir_ + "/" + stage + ".pcd", cloud);
-    }
+    void saveFrontendCloud(const FrameContext& frame, const std::string& stage,
+                           const PointCloudType& cloud, const std::string& coordinate_frame,
+                           bool force = false);
+    void saveBackendCloud(const std::string& event, const std::string& stage,
+                          const PointCloudType& cloud, const std::string& coordinate_frame);
+    void saveMapCloud(const std::string& stage, const PointCloudType& cloud,
+                      const std::string& coordinate_frame);
 
+    void appendFrameRow(const FrameContext& frame, const std::string& filename,
+                        const std::string& header, const std::string& row, bool force = false);
+    void appendBackendRow(const std::string& event, const std::string& filename,
+                          const std::string& header, const std::string& row);
+    void appendGlobalRow(const std::string& filename, const std::string& header,
+                         const std::string& row);
+    void writeRunMetadata(const std::string& yaml_text);
+
+    void appendImu(double timestamp, double ax, double ay, double az,
+                   double gx, double gy, double gz);
+
+    // Compatibility wrappers used while legacy call sites are migrated.
+    void startFrame(int frame_id);
+    void savePcd(const std::string& stage, const PointCloudType& cloud);
     void appendEkf(int iter, const Vec3d& pos, const Eigen::Quaterniond& q,
                    const Vec3d& vel, const Vec3d& bg,
                    double yaw, double pitch, double roll,
-                   int match_pts, double res_mean, double res_max) {
-        if (!params_.csv_ekf || !ekf_csv_.is_open()) return;
-        std::lock_guard<std::mutex> lock(mtx_);
-        ekf_csv_ << frame_id_ << "," << iter << ","
-                 << pos.x() << "," << pos.y() << "," << pos.z() << ","
-                 << q.w() << "," << q.x() << "," << q.y() << "," << q.z() << ","
-                 << vel.x() << "," << vel.y() << "," << vel.z() << ","
-                 << bg.x() << "," << bg.y() << "," << bg.z() << ","
-                 << yaw << "," << pitch << "," << roll << ","
-                 << match_pts << "," << res_mean << "," << res_max << "\n";
-    }
+                   int match_pts, double res_mean, double res_max);
 
-    void appendImu(double timestamp, double ax, double ay, double az,
-                   double gx, double gy, double gz) {
-        if (!params_.csv_imu || !imu_csv_.is_open()) return;
-        std::lock_guard<std::mutex> lock(mtx_);
-        imu_csv_ << std::setprecision(15) << timestamp << ","
-                 << ax << "," << ay << "," << az << ","
-                 << gx << "," << gy << "," << gz << "\n";
-    }
-
-    void flush() {
-        if (ekf_csv_.is_open()) ekf_csv_.flush();
-        if (imu_csv_.is_open()) imu_csv_.flush();
-    }
+    void flush();
 
    private:
+    std::filesystem::path FrontendDirectory(std::uint64_t frame_id) const;
+    std::filesystem::path BackendDirectory(const std::string& event) const;
+    static std::string PaddedId(std::uint64_t id);
+    static std::string SafeComponent(const std::string& value);
+
+    void SaveCloud(const std::filesystem::path& directory, const std::string& stage,
+                   const PointCloudType& cloud, const std::string& coordinate_frame,
+                   double lidar_begin_time, double lidar_end_time);
+    void AppendRow(const std::filesystem::path& path, const std::string& header,
+                   const std::string& row);
+
     Params params_;
-    int frame_id_ = 0;
-    std::string frame_dir_;
-    std::ofstream ekf_csv_;
-    std::ofstream imu_csv_;
-    std::mutex mtx_;
+    std::filesystem::path output_dir_;
+    std::uint64_t next_processed_frame_id_ = 0;
+    std::uint64_t imu_sample_count_ = 0;
+
+    FrameContext legacy_frame_;
+    bool legacy_frame_valid_ = false;
+
+    mutable std::mutex mutex_;
 };
 
 }  // namespace lightning
