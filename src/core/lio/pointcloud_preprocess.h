@@ -25,6 +25,14 @@ class PointCloudPreprocess {
    public:
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 
+    struct Stats {
+        std::size_t input_points = 0;
+        std::size_t stride_rejected = 0;
+        std::size_t range_rejected = 0;
+        std::size_t height_rejected = 0;
+        std::size_t output_points = 0;
+    };
+
     PointCloudPreprocess() = default;
     ~PointCloudPreprocess() = default;
 
@@ -43,6 +51,7 @@ class PointCloudPreprocess {
     LidarType GetLidarType() const { return lidar_type_; }
     void SetLidarType(LidarType lt) { lidar_type_ = lt; }
     bool InputIsPredeskewed() const { return lidar_type_ == LidarType::POLKA_MERGED; }
+    const Stats& GetLastStats() const { return last_stats_; }
 
     void SetHeightROI(float height_max, float height_min) {
         height_max_ = height_max;
@@ -69,6 +78,7 @@ class PointCloudPreprocess {
     float height_min_ = -1.0;
 
     std::string expected_frame_ = "base_footprint";
+    Stats last_stats_;
 };
 }  // namespace lightning
 

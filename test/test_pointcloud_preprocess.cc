@@ -103,6 +103,48 @@ TEST(PointCloudPreprocess, AcceptsPredeskewedPolkaXyzi) {
     EXPECT_TRUE(preprocess.InputIsPredeskewed());
 }
 
+TEST(PointCloudPreprocess, ReportsPolkaFilterReasonCounts) {
+    auto msg = std::make_shared<sensor_msgs::msg::PointCloud2>();
+    msg->header.frame_id = "base_footprint";
+    sensor_msgs::PointCloud2Modifier modifier(*msg);
+    modifier.setPointCloud2Fields(4, "x", 1, sensor_msgs::msg::PointField::FLOAT32, "y", 1,
+                                  sensor_msgs::msg::PointField::FLOAT32, "z", 1,
+                                  sensor_msgs::msg::PointField::FLOAT32, "intensity", 1,
+                                  sensor_msgs::msg::PointField::FLOAT32);
+    modifier.resize(5);
+    sensor_msgs::PointCloud2Iterator<float> x(*msg, "x");
+    sensor_msgs::PointCloud2Iterator<float> y(*msg, "y");
+    sensor_msgs::PointCloud2Iterator<float> z(*msg, "z");
+    sensor_msgs::PointCloud2Iterator<float> intensity(*msg, "intensity");
+    const std::vector<float> xs{1.0F, 1.0F, 0.1F, 1.0F, 1.0F};
+    const std::vector<float> zs{0.0F, 0.0F, 0.0F, 0.0F, 2.0F};
+    for (std::size_t i = 0; i < xs.size(); ++i) {
+        *x = xs[i];
+        *y = 0.0F;
+        *z = zs[i];
+        *intensity = 1.0F;
+        ++x;
+        ++y;
+        ++z;
+        ++intensity;
+    }
+
+    PointCloudPreprocess preprocess;
+    preprocess.SetLidarType(LidarType::POLKA_MERGED);
+    preprocess.PointFilterNum() = 2;
+    preprocess.Blind() = 0.5;
+    preprocess.SetHeightROI(1.0F, -1.0F);
+    PointCloudType::Ptr output(new PointCloudType);
+    preprocess.Process(msg, output);
+
+    const auto stats = preprocess.GetLastStats();
+    EXPECT_EQ(stats.input_points, 5U);
+    EXPECT_EQ(stats.stride_rejected, 2U);
+    EXPECT_EQ(stats.range_rejected, 1U);
+    EXPECT_EQ(stats.height_rejected, 1U);
+    EXPECT_EQ(stats.output_points, 1U);
+}
+
 TEST(PointCloudPreprocess, RejectsPolkaCloudWithoutFloat32Intensity) {
     auto msg = MakeXyziCloud("base_footprint");
     msg->fields.pop_back();
@@ -125,15 +167,17 @@ TEST(ArticulatedVehicleConfig, UsesPolkaAndRearAiryImu) {
     EXPECT_EQ(yaml["fasterlio"]["lidar_type"].as<int>(), 5);
     EXPECT_TRUE(yaml["fasterlio"]["extrinsic_from_tf"].as<bool>());
     EXPECT_EQ(yaml["fasterlio"]["lidar_frame_id"].as<std::string>(), "base_footprint");
-    EXPECT_EQ(yaml["fasterlio"]["imu_frame_id"].as<std::string>(), "rear_lidar_imu_ned");
+    EXPECT_EQ(yaml["fasterlio"]["imu_frame_id"].as<std::string>(), "rear_lidar_imu");
     EXPECT_EQ(yaml["system"]["map_path"].as<std::string>(), "src/robot_navigation/maps/");
     EXPECT_EQ(yaml["fasterlio"]["extrinsic_T"].as<std::vector<double>>(),
-              (std::vector<double>{-0.000744, 0.640484, -0.415733}));
+              (std::vector<double>{0.007012, -0.406615, 0.632167}));
     EXPECT_EQ(yaml["fasterlio"]["extrinsic_R"].as<std::vector<double>>(),
-              (std::vector<double>{-0.000992, 0.999963, -0.008486,
-                                   0.000420, 0.008487, 0.999964,
-                                   0.999999, 0.000988, -0.000429}));
+              (std::vector<double>{-0.000987, 0.999965, -0.008248,
+                                   0.000301, 0.008248, 0.999966,
+                                   0.999999, 0.000985, -0.000309}));
     EXPECT_FALSE(yaml["system"]["step_on_kf"].as<bool>());
+    EXPECT_EQ(yaml["data_capture"]["every_n_frames"].as<int>(), 10);
+    EXPECT_EQ(yaml["data_capture"]["eskf_iteration_stride"].as<int>(), 1);
 }
 
 TEST(LaserMappingExtrinsic, CanOverrideManualExtrinsic) {

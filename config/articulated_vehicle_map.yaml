@@ -158,3 +158,25 @@ ui:
 data_capture:
   enabled: false
   output_dir: "/tmp/lightning_capture"
+
+  # 普通前端帧采样：1=每帧，10=每 10 个成功 SyncPackages 的帧。
+  every_n_frames: 10
+  frame_start: 0
+  frame_end: -1
+  eskf_iteration_stride: 1
+  imu_sample_stride: 1
+
+  frontend_enabled: true
+  frontend_iterations_enabled: true
+  backend_enabled: true
+  map_output_enabled: true
+
+  # 关键算法事件独立于普通帧采样。
+  capture_all_keyframes: true
+  capture_all_loop_candidates: true
+  capture_all_pgo_events: true
+  capture_ivox_snapshot: false
+
+  binary_compressed: true
+  # 0=保存完整点云；非零值仅限制写盘副本，不改变 SLAM 输入。
+  max_points_per_cloud: 0

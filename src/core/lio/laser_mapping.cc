@@ -60,6 +60,19 @@ constexpr const char* kStateCsvHeader =
     "timestamp,pos_x,pos_y,pos_z,qw,qx,qy,qz,vel_x,vel_y,vel_z,"
     "bg_x,bg_y,bg_z,grav_x,grav_y,grav_z";
 
+std::string PrefixedStateCsvHeader(const std::string& prefix) {
+    std::stringstream input(kStateCsvHeader);
+    std::ostringstream output;
+    std::string column;
+    bool first = true;
+    while (std::getline(input, column, ',')) {
+        if (!first) output << ",";
+        output << prefix << column;
+        first = false;
+    }
+    return output.str();
+}
+
 }  // namespace
 
 bool LaserMapping::Init(const std::string &config_yaml) {
@@ -376,12 +389,21 @@ bool LaserMapping::Run() {
         capture_frame_ =
             data_capture_.beginProcessedFrame(measures_.lidar_begin_time_, measures_.lidar_end_time_);
         capture_frame_valid_ = true;
-        capture_obs_iteration_ = 0;
 
         data_capture_.saveFrontendCloud(
             capture_frame_, "00_lightning_input_from_polka", *current_input_cloud_, lidar_frame_id_);
         data_capture_.saveFrontendCloud(
             capture_frame_, "01_preprocessed_lidar", *measures_.scan_, lidar_frame_id_);
+        std::ostringstream preprocess_row;
+        preprocess_row << current_preprocess_stats_.input_points << ","
+                       << current_preprocess_stats_.stride_rejected << ","
+                       << current_preprocess_stats_.range_rejected << ","
+                       << current_preprocess_stats_.height_rejected << ","
+                       << current_preprocess_stats_.output_points;
+        data_capture_.appendFrameRow(
+            capture_frame_, "preprocess.csv",
+            "input_points,stride_rejected,range_rejected,height_rejected,output_points",
+            preprocess_row.str());
 
         std::ostringstream sync_row;
         const double first_imu = measures_.imu_.empty() ? 0.0 : measures_.imu_.front()->timestamp;
@@ -606,7 +628,7 @@ bool LaserMapping::Run() {
             << effect_feat_surf_ << "," << effect_feat_icp_;
         data_capture_.appendFrameRow(
             capture_frame_, "frontend_result.csv",
-            std::string("pred_") + kStateCsvHeader + ",updated_" + kStateCsvHeader +
+            PrefixedStateCsvHeader("pred_") + "," + PrefixedStateCsvHeader("updated_") +
                 ",iterations,final_residual_ratio,surface_matches,icp_matches",
             row.str());
     }
@@ -772,21 +794,21 @@ void LaserMapping::MakeKF() {
 
         const Eigen::Quaterniond lio_q(kf->GetLIOPose().so3().unit_quaternion());
         const Eigen::Quaterniond opt_q(kf->GetOptPose().so3().unit_quaternion());
+        const Eigen::Vector3d lio_t = kf->GetLIOPose().translation();
+        const Eigen::Vector3d opt_t = kf->GetOptPose().translation();
         std::ostringstream row;
         row << capture_frame_.id << "," << kf->GetID() << "," << std::setprecision(15)
             << state_point_.timestamp_ << ","
-            << kf->GetLIOPose().translation().transpose() << ","
+            << lio_t.x() << "," << lio_t.y() << "," << lio_t.z() << ","
             << lio_q.w() << "," << lio_q.x() << "," << lio_q.y() << "," << lio_q.z() << ","
-            << kf->GetOptPose().translation().transpose() << ","
+            << opt_t.x() << "," << opt_t.y() << "," << opt_t.z() << ","
             << opt_q.w() << "," << opt_q.x() << "," << opt_q.y() << "," << opt_q.z();
-        std::string csv_row = row.str();
-        std::replace(csv_row.begin(), csv_row.end(), ' ', ',');
         data_capture_.appendGlobalRow(
             "keyframes.csv",
             "processed_frame_id,keyframe_id,timestamp,"
             "lio_x,lio_y,lio_z,lio_qw,lio_qx,lio_qy,lio_qz,"
             "opt_x,opt_y,opt_z,opt_qw,opt_qx,opt_qy,opt_qz",
-            csv_row);
+            row.str());
     }
 
     LOG(INFO) << "LIO: create kf " << kf->GetID() << ", state: " << state_point_.pos_.transpose()
@@ -856,6 +878,7 @@ void LaserMapping::ProcessPointCloud2(const sensor_msgs::msg::PointCloud2::Share
                     LOG(ERROR) << "DataCapture failed to convert Polka input: " << e.what();
                     lidar_input_buffer_.push_back(cloud);
                 }
+                preprocess_stats_buffer_.push_back(preprocess_->GetLastStats());
             }
             lidar_buffer_.push_back(cloud);
             time_buffer_.push_back(timestamp);
@@ -992,6 +1015,10 @@ bool LaserMapping::SyncPackages() {
     if (data_capture_.enabled() && !lidar_input_buffer_.empty()) {
         current_input_cloud_ = lidar_input_buffer_.front();
         lidar_input_buffer_.pop_front();
+        if (!preprocess_stats_buffer_.empty()) {
+            current_preprocess_stats_ = preprocess_stats_buffer_.front();
+            preprocess_stats_buffer_.pop_front();
+        }
     } else {
         current_input_cloud_ = measures_.scan_;
     }
@@ -1237,6 +1264,17 @@ void LaserMapping::MapIncremental() {
             capture_frame_, "ivox_incremental.csv",
             "candidate_points,voxel_checked_added,no_downsample_added,total_added,valid_grids",
             row.str(), force);
+
+        if (capture_frame_.sampled && data_capture_.params().capture_ivox_snapshot) {
+            const auto snapshot_points = ivox_->GetAllPoints();
+            PointCloudType snapshot;
+            snapshot.points.assign(snapshot_points.begin(), snapshot_points.end());
+            snapshot.width = static_cast<std::uint32_t>(snapshot.size());
+            snapshot.height = 1;
+            snapshot.is_dense = false;
+            data_capture_.saveFrontendCloud(
+                capture_frame_, "06_ivox_full_snapshot", snapshot, world_frame_id_);
+        }
     }
 }
 
@@ -1515,7 +1553,8 @@ void LaserMapping::CaptureEskfIteration(const ESKF::IterationInfo& info) {
 
     std::string header =
         std::string("iteration,valid,accepted,converged,effective_features,observable_rank,")
-        + "residual_mean,residual_max,before_" + kStateCsvHeader + ",after_" + kStateCsvHeader;
+        + "residual_mean,residual_max," + PrefixedStateCsvHeader("before_") + "," +
+        PrefixedStateCsvHeader("after_");
     for (int i = 0; i < ESKF::state_dim_; ++i) header += ",dx_" + std::to_string(i);
     for (int i = 0; i < ESKF::pose_obs_dim_; ++i) header += ",eigenvalue_" + std::to_string(i);
     for (int r = 0; r < ESKF::pose_obs_dim_; ++r) {

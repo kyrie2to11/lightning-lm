@@ -115,6 +115,7 @@ class LaserMapping {
     const Vec3d &GetExtrinsicTranslation() const { return offset_t_lidar_fixed_; }
     const Mat3d &GetExtrinsicRotation() const { return offset_R_lidar_fixed_; }
     bool GetInputIsPredeskewed() const { return preprocess_->InputIsPredeskewed(); }
+    const std::string& GetWorldFrameId() const { return world_frame_id_; }
 
     /// 获取关键帧
     Keyframe::Ptr GetKeyframe() const { return last_kf_; }
@@ -231,12 +232,13 @@ class LaserMapping {
 
     std::deque<PointCloudType::Ptr> lidar_buffer_;
     std::deque<PointCloudType::Ptr> lidar_input_buffer_;
+    std::deque<PointCloudPreprocess::Stats> preprocess_stats_buffer_;
     std::deque<lightning::IMUPtr> imu_buffer_;
     CloudPtr current_input_cloud_{new PointCloudType()};
+    PointCloudPreprocess::Stats current_preprocess_stats_;
 
     DataCapture::FrameContext capture_frame_;
     bool capture_frame_valid_ = false;
-    int capture_obs_iteration_ = 0;
     std::string lidar_frame_id_ = "lidar";
     std::string imu_frame_id_ = "imu";
     std::string world_frame_id_ = "world";

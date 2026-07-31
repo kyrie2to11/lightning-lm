@@ -195,6 +195,7 @@ void PointCloudPreprocess::RoboSenseHandler(const sensor_msgs::msg::PointCloud2:
 void PointCloudPreprocess::PolkaMergedHandler(const sensor_msgs::msg::PointCloud2::SharedPtr &msg) {
     cloud_out_.clear();
     cloud_full_.clear();
+    last_stats_ = Stats{};
 
     if (!expected_frame_.empty() && msg->header.frame_id != expected_frame_) {
         LOG(WARNING) << "Polka merged PointCloud2 frame is '" << msg->header.frame_id
@@ -213,14 +214,21 @@ void PointCloudPreprocess::PolkaMergedHandler(const sensor_msgs::msg::PointCloud
 
     pcl::PointCloud<pcl::PointXYZI> input;
     pcl::fromROSMsg(*msg, input);
+    last_stats_.input_points = input.size();
     cloud_out_.reserve(input.size());
     for (std::size_t i = 0; i < input.size(); ++i) {
         if (i % static_cast<std::size_t>(point_filter_num_) != 0) {
+            ++last_stats_.stride_rejected;
             continue;
         }
         const auto &source = input[i];
         const double range = source.x * source.x + source.y * source.y + source.z * source.z;
-        if (range < blind_ * blind_ || source.z < height_min_ || source.z > height_max_) {
+        if (range < blind_ * blind_) {
+            ++last_stats_.range_rejected;
+            continue;
+        }
+        if (source.z < height_min_ || source.z > height_max_) {
+            ++last_stats_.height_rejected;
             continue;
         }
         PointType point;
@@ -234,6 +242,7 @@ void PointCloudPreprocess::PolkaMergedHandler(const sensor_msgs::msg::PointCloud
     cloud_out_.width = cloud_out_.size();
     cloud_out_.height = 1;
     cloud_out_.is_dense = input.is_dense;
+    last_stats_.output_points = cloud_out_.size();
 }
 
 void PointCloudPreprocess::VelodyneHandler(const sensor_msgs::msg::PointCloud2::SharedPtr &msg) {

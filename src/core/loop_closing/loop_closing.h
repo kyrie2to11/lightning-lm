@@ -7,6 +7,7 @@
 
 #include "common/keyframe.h"
 #include "common/loop_candidate.h"
+#include "common/data_capture.h"
 #include "utils/async_message_process.h"
 
 #include "core/graph/optimizer.h"
@@ -55,6 +56,7 @@ class LoopClosing {
     /// 如果检测到新地回环并发生了优化，则调用回调
     using LoopClosedCallback = std::function<void()>;
     void SetLoopClosedCB(LoopClosedCallback cb) { loop_cb_ = cb; }
+    void SetDataCapture(DataCapture* capture) { data_capture_ = capture; }
 
    protected:
     void HandleKF(Keyframe::Ptr kf);
@@ -89,6 +91,10 @@ class LoopClosing {
     std::vector<std::shared_ptr<miao::EdgeSE3>> edge_loops_;
 
     LoopClosedCallback loop_cb_;
+    DataCapture* data_capture_ = nullptr;
+    std::uint64_t pgo_event_id_ = 0;
+    std::string imu_frame_id_ = "imu";
+    std::string world_frame_id_ = "world";
 };
 
 }  // namespace lightning

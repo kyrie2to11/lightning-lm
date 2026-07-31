@@ -79,6 +79,7 @@ bool SlamSystem::Init(const std::string& yaml_path) {
         LoopClosing::Options options;
         options.online_mode_ = options_.online_mode_;
         lc_ = std::make_shared<LoopClosing>(options);
+        lc_->SetDataCapture(&lio_->data_capture_);
         lc_->Init(yaml_path);
     }
 
@@ -548,6 +549,23 @@ void SlamSystem::SaveMap(const std::string& path) {
     tm.ConvertFromFullPCD(global_map, start_pose, save_path);
 
     pcl::io::savePCDFileBinaryCompressed(save_path + "/global.pcd", *global_map);
+
+    if (lio_->data_capture_.enabled() && lio_->data_capture_.params().map_output_enabled) {
+        CloudPtr lio_map =
+            options_.with_loop_closing_ ? lio_->GetGlobalMap(true) : global_map;
+        CloudPtr optimized_map =
+            options_.with_loop_closing_ ? global_map : lio_->GetGlobalMap(false);
+        const std::string& world_frame = lio_->GetWorldFrameId();
+        lio_->data_capture_.saveMapCloud("assembled_lio", *lio_map, world_frame);
+        lio_->data_capture_.saveMapCloud("assembled_optimized", *optimized_map, world_frame);
+        lio_->data_capture_.saveMapCloud("selected_global", *global_map, world_frame);
+        lio_->data_capture_.appendGlobalRow(
+            "map_output.csv",
+            "production_path,loop_closing_enabled,lio_points,optimized_points,selected_points",
+            save_path + "/global.pcd," + (options_.with_loop_closing_ ? "1," : "0,") +
+                std::to_string(lio_map->size()) + "," + std::to_string(optimized_map->size()) + "," +
+                std::to_string(global_map->size()));
+    }
     // pcl::io::savePCDFileBinaryCompressed(save_path + "/global_no_loop.pcd", *global_map_no_loop);
     // pcl::io::savePCDFileBinaryCompressed(save_path + "/global_raw.pcd", *global_map_raw);
 

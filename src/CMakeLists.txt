@@ -108,6 +108,12 @@ if(BUILD_TESTING)
     target_link_libraries(test_eskf_iteration_capture
             ${PROJECT_NAME}.libs
             ${third_party_libs})
+
+    ament_add_gtest(test_ivox_snapshot
+            ${PROJECT_SOURCE_DIR}/test/test_ivox_snapshot.cc)
+    target_link_libraries(test_ivox_snapshot
+            ${PROJECT_NAME}.libs
+            ${third_party_libs})
 endif()
 
 add_subdirectory(app)

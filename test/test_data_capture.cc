@@ -2,7 +2,9 @@
 
 #include <chrono>
 #include <filesystem>
+#include <fstream>
 #include <string>
+#include <vector>
 
 #include "common/data_capture.h"
 
@@ -130,6 +132,28 @@ TEST_F(DataCaptureTest, IterationCloudUsesNestedIterationDirectory) {
     EXPECT_TRUE(std::filesystem::exists(
         output_dir_ / "frontend" / "frame_000000" /
         "iteration_03" / "observation.csv"));
+}
+
+TEST_F(DataCaptureTest, MultilineRowsDoNotAppendAnEmptyCsvRecord) {
+    DataCapture capture;
+    capture.configure(EnabledParams());
+
+    const auto frame = capture.beginProcessedFrame(1.0, 1.0);
+    capture.appendFrontendIterationRow(
+        frame, 0, "correspondences.csv", "index,value", "0,10\n1,20\n");
+
+    std::ifstream input(
+        output_dir_ / "frontend" / "frame_000000" /
+        "iteration_00" / "correspondences.csv");
+    std::vector<std::string> lines;
+    for (std::string line; std::getline(input, line);) {
+        lines.push_back(line);
+    }
+
+    ASSERT_EQ(lines.size(), 3U);
+    EXPECT_EQ(lines[0], "index,value");
+    EXPECT_EQ(lines[1], "0,10");
+    EXPECT_EQ(lines[2], "1,20");
 }
 
 }  // namespace

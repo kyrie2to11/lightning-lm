@@ -84,6 +84,9 @@ class IVox {
     /// get number of points
     size_t NumPoints() const;
 
+    /// capture-only snapshot of all points currently stored in the local map
+    PointVector GetAllPoints() const;
+
     /// get number of valid grids
     size_t NumValidGrids() const;
 
@@ -207,6 +210,20 @@ size_t IVox<dim, node_type, PointType>::NumPoints() const {
         ret += g.second->second.Size();
     }
     return ret;
+}
+
+template <int dim, IVoxNodeType node_type, typename PointType>
+typename IVox<dim, node_type, PointType>::PointVector
+IVox<dim, node_type, PointType>::GetAllPoints() const {
+    PointVector points;
+    points.reserve(NumPoints());
+    for (const auto& grid : grids_cache_) {
+        const auto& node = grid.second;
+        for (std::size_t index = 0; index < node.Size(); ++index) {
+            points.emplace_back(node.GetPoint(index));
+        }
+    }
+    return points;
 }
 
 template <int dim, IVoxNodeType node_type, typename PointType>

@@ -317,7 +317,10 @@ void DataCapture::AppendRow(const std::filesystem::path& path, const std::string
         if (write_header && !header.empty()) {
             out << header << "\n";
         }
-        out << row << "\n";
+        out << row;
+        if (row.empty() || row.back() != '\n') {
+            out << "\n";
+        }
     } catch (const std::exception& e) {
         LOG(ERROR) << "DataCapture row write failed: " << e.what();
     }
