@@ -2,6 +2,7 @@ add_library(${PROJECT_NAME}.libs SHARED
         common/nav_state.cc
         common/constant.h
         common/data_capture.cc
+        common/debug_visualization.cc
         common/options.cc
         common/params.cc
 
@@ -52,6 +53,7 @@ ament_target_dependencies(
         "geometry_msgs"
         "sensor_msgs"
         "nav_msgs"
+        "plotjuggler_msgs"
         "std_srvs"
         "message_filters"
         "pcl_conversions"
@@ -112,6 +114,12 @@ if(BUILD_TESTING)
     ament_add_gtest(test_ivox_snapshot
             ${PROJECT_SOURCE_DIR}/test/test_ivox_snapshot.cc)
     target_link_libraries(test_ivox_snapshot
+            ${PROJECT_NAME}.libs
+            ${third_party_libs})
+
+    ament_add_gtest(test_debug_visualization
+            ${PROJECT_SOURCE_DIR}/test/test_debug_visualization.cc)
+    target_link_libraries(test_debug_visualization
             ${PROJECT_NAME}.libs
             ${third_party_libs})
 endif()

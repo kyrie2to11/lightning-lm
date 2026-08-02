@@ -15,6 +15,8 @@
 
 namespace lightning {
 
+class DebugVisualization;
+
 /**
  * 基于grid ndt的回环检测
  */
@@ -57,6 +59,9 @@ class LoopClosing {
     using LoopClosedCallback = std::function<void()>;
     void SetLoopClosedCB(LoopClosedCallback cb) { loop_cb_ = cb; }
     void SetDataCapture(DataCapture* capture) { data_capture_ = capture; }
+    void SetDebugVisualization(std::shared_ptr<DebugVisualization> debug) {
+        debug_visualization_ = std::move(debug);
+    }
 
    protected:
     void HandleKF(Keyframe::Ptr kf);
@@ -92,6 +97,7 @@ class LoopClosing {
 
     LoopClosedCallback loop_cb_;
     DataCapture* data_capture_ = nullptr;
+    std::shared_ptr<DebugVisualization> debug_visualization_ = nullptr;
     std::uint64_t pgo_event_id_ = 0;
     std::string imu_frame_id_ = "imu";
     std::string world_frame_id_ = "world";

@@ -11,6 +11,7 @@ find_package(std_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
+find_package(plotjuggler_msgs REQUIRED)
 find_package(std_srvs REQUIRED)
 find_package(OpenCV REQUIRED)
 find_package(tf2 REQUIRED)
@@ -48,6 +49,7 @@ include_directories(
         ${rclcpp_INCLUDE_DIRS}
         ${rosbag2_cpp_INCLUDE_DIRS}
         ${nav_msgs_INCLUDE_DIRS}
+        ${plotjuggler_msgs_INCLUDE_DIRS}
 )
 
 include_directories(
@@ -70,4 +72,3 @@ set(third_party_libs
         tbb
         ${rosbag2_cpp_LIBRARIES}
 )
-

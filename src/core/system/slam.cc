@@ -5,6 +5,7 @@
 #include <sensor_msgs/msg/joint_state.hpp>
 
 #include "core/system/slam.h"
+#include "common/debug_visualization.h"
 #include "core/g2p5/g2p5.h"
 #include "core/lio/laser_mapping.h"
 #include "core/lio/multibody.h"
@@ -37,6 +38,21 @@ bool SlamSystem::Init(const std::string& yaml_path) {
     }
 
     auto yaml = YAML::LoadFile(yaml_path);
+
+    DebugVisualization::Params debug_params;
+    if (const auto debug = yaml["debug_visualization"]) {
+        debug_params.live_cloud_enabled = debug["live_cloud_enabled"].as<bool>(false);
+        debug_params.live_cloud_every_n_frames =
+            debug["live_cloud_every_n_frames"].as<int>(10);
+        debug_params.live_timeseries_enabled =
+            debug["live_timeseries_enabled"].as<bool>(false);
+        debug_params.live_timeseries_every_n_frames =
+            debug["live_timeseries_every_n_frames"].as<int>(1);
+        debug_params.max_cloud_points = debug["max_cloud_points"].as<std::size_t>(50000);
+        debug_params.max_correspondence_markers =
+            debug["max_correspondence_markers"].as<std::size_t>(2000);
+    }
+    DebugVisualization::Validate(debug_params);
 
     // Data capture config
     if (yaml["data_capture"] && yaml["data_capture"]["enabled"].as<bool>(false)) {
@@ -123,6 +139,16 @@ bool SlamSystem::Init(const std::string& yaml_path) {
 
         /// subscribers
         node_ = std::make_shared<rclcpp::Node>("lightning_slam");
+        if (debug_params.live_cloud_enabled || debug_params.live_timeseries_enabled) {
+            debug_visualization_ = std::make_shared<DebugVisualization>(debug_params, node_);
+            lio_->SetDebugVisualization(debug_visualization_);
+            if (lc_) {
+                lc_->SetDebugVisualization(debug_visualization_);
+            }
+            LOG(INFO) << "Lightning debug visualization enabled: clouds="
+                      << debug_params.live_cloud_enabled
+                      << ", timeseries=" << debug_params.live_timeseries_enabled;
+        }
 
         // Check multi-body config
         const bool multibody_enabled =

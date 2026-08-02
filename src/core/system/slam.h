@@ -25,6 +25,7 @@ namespace lightning {
 
 class LaserMapping;  //  lio 前端
 class LoopClosing;   // 回环检测
+class DebugVisualization;
 
 namespace ui {
 class PangolinWindow;
@@ -97,6 +98,7 @@ class SlamSystem {
 
     std::shared_ptr<LaserMapping> lio_ = nullptr;       // lio 前端
     std::shared_ptr<LoopClosing> lc_ = nullptr;         // 回环检测
+    std::shared_ptr<DebugVisualization> debug_visualization_ = nullptr;
     std::shared_ptr<ui::PangolinWindow> ui_ = nullptr;  // ui
     std::shared_ptr<g2p5::G2P5> g2p5_ = nullptr;        // 栅格地图
 

@@ -16,6 +16,7 @@
 - 普通帧按配置频率发布；关键帧、回环和 PGO 允许强制发布。
 - 生产启动脚本不得自动打开 Lichtblick 或 PlotJuggler。
 - 不引入新的 Python pip 依赖；使用机器已有 Open3D、Matplotlib、Plotly、Pandas。
+- 所有 Lightning 构建必须设置 `MAKEFLAGS=-j4 CMAKE_BUILD_PARALLEL_LEVEL=4`，禁止超过 4 个编译 worker。
 
 ---
 

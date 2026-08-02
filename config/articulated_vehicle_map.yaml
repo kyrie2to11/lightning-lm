@@ -180,3 +180,16 @@ data_capture:
   binary_compressed: true
   # 0=保存完整点云；非零值仅限制写盘副本，不改变 SLAM 输入。
   max_points_per_cloud: 0
+
+# 在线教学调试；生产运行保持全部关闭。
+debug_visualization:
+  live_cloud_enabled: false
+  live_cloud_every_n_frames: 10
+  live_timeseries_enabled: false
+  live_timeseries_every_n_frames: 1
+  max_cloud_points: 50000
+  max_correspondence_markers: 2000
+
+# 独立 DataCapture 回放器的防误启动门；Lightning 主进程不会自动启动它。
+stage_replay:
+  enabled: false

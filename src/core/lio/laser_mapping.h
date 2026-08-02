@@ -22,6 +22,8 @@
 
 namespace lightning {
 
+class DebugVisualization;
+
 namespace ui {
 class PangolinWindow;
 }
@@ -95,6 +97,9 @@ class LaserMapping {
     void SaveMap();
 
     void SetUI(std::shared_ptr<ui::PangolinWindow> ui) { ui_ = ui; }
+    void SetDebugVisualization(std::shared_ptr<DebugVisualization> debug) {
+        debug_visualization_ = std::move(debug);
+    }
 
     void SetExtrinsic(const Vec3d &translation, const Mat3d &rotation);
     void SetInitialWorldImuRotation(const Mat3d &R_world_imu);
@@ -194,6 +199,9 @@ class LaserMapping {
     std::shared_ptr<IVoxType> ivox_ = nullptr;                    // localmap in ivox
     std::shared_ptr<PointCloudPreprocess> preprocess_ = nullptr;  // point cloud preprocess
     std::shared_ptr<ImuProcess> p_imu_ = nullptr;                 // imu process
+    std::shared_ptr<DebugVisualization> debug_visualization_ = nullptr;
+    std::uint64_t debug_frame_id_ = 0;
+    std::uint64_t next_debug_frame_id_ = 0;
 
     /// local map related
     double filter_size_map_min_ = 0;

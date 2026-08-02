@@ -3,6 +3,7 @@
 //
 
 #include "core/loop_closing/loop_closing.h"
+#include "common/debug_visualization.h"
 #include "common/keyframe.h"
 #include "common/loop_candidate.h"
 #include "utils/pointcloud_utils.h"
@@ -328,6 +329,16 @@ void LoopClosing::ComputeForCandidate(lightning::LoopCandidate& c) {
     }
 
     Mat4f Tw2 = kf2->GetOptPose().matrix().cast<float>();
+    if (debug_visualization_) {
+        PointCloudType source_world_initial;
+        pcl::transformPointCloud(*submap_kf2, source_world_initial, Tw2);
+        debug_visualization_->publishCloud(
+            "backend/ndt/source", source_world_initial, world_frame_id_,
+            kf2->GetState().timestamp_, kf2->GetID(), true);
+        debug_visualization_->publishCloud(
+            "backend/ndt/target", *submap_kf1, world_frame_id_,
+            kf2->GetState().timestamp_, kf2->GetID(), true);
+    }
     if (capture_event) {
         PointCloudType source_world_initial;
         pcl::transformPointCloud(*submap_kf2, source_world_initial, Tw2);
@@ -369,6 +380,20 @@ void LoopClosing::ComputeForCandidate(lightning::LoopCandidate& c) {
         Tw2 = ndt.getFinalTransformation();
 
         c.ndt_score_ = ndt.getTransformationProbability();
+        if (debug_visualization_) {
+            debug_visualization_->publishCloud(
+                "backend/ndt/aligned_resolution_" +
+                    std::to_string(static_cast<int>(r)),
+                *output, world_frame_id_, kf2->GetState().timestamp_, kf2->GetID(), true);
+            debug_visualization_->publishMetrics(
+                {{"ndt/resolution", r},
+                 {"ndt/probability", c.ndt_score_},
+                 {"ndt/iterations", static_cast<double>(ndt.getFinalNumIteration())},
+                 {"ndt/converged", ndt.hasConverged() ? 1.0 : 0.0},
+                 {"ndt/source_keyframe", static_cast<double>(c.idx2_)},
+                 {"ndt/target_keyframe", static_cast<double>(c.idx1_)}},
+                kf2->GetState().timestamp_, kf2->GetID(), true);
+        }
         if (capture_event) {
             const std::string resolution = std::to_string(static_cast<int>(r));
             data_capture_->saveBackendCloud(
@@ -596,6 +621,36 @@ void LoopClosing::PoseOptimization() {
                 std::to_string(keyframe->GetID()) + "," + PoseCsv(pose_after) + "," +
                     PoseCsv(correction));
         }
+    }
+
+    if (debug_visualization_) {
+        std::vector<SE3> lio_poses;
+        std::vector<SE3> optimized_poses;
+        lio_poses.reserve(all_keyframes_.size());
+        optimized_poses.reserve(all_keyframes_.size());
+        double max_translation_correction = 0.0;
+        double max_rotation_correction = 0.0;
+        for (const auto& keyframe : all_keyframes_) {
+            lio_poses.push_back(keyframe->GetLIOPose());
+            optimized_poses.push_back(keyframe->GetOptPose());
+            const SE3 correction = keyframe->GetLIOPose().inverse() * keyframe->GetOptPose();
+            max_translation_correction =
+                std::max(max_translation_correction, correction.translation().norm());
+            max_rotation_correction = std::max(
+                max_rotation_correction, correction.so3().log().norm() * 180.0 / M_PI);
+        }
+        const auto frame_id = static_cast<std::uint64_t>(cur_kf_->GetID());
+        const double timestamp = cur_kf_->GetState().timestamp_;
+        debug_visualization_->publishPath(
+            "path/lio", lio_poses, world_frame_id_, timestamp, frame_id, true);
+        debug_visualization_->publishPath(
+            "path/optimized", optimized_poses, world_frame_id_, timestamp, frame_id, true);
+        debug_visualization_->publishMetrics(
+            {{"pgo/loop_candidates", static_cast<double>(candidates_.size())},
+             {"pgo/loop_outliers", static_cast<double>(cnt_outliers)},
+             {"pgo/max_translation_correction", max_translation_correction},
+             {"pgo/max_rotation_correction_deg", max_rotation_correction}},
+            timestamp, frame_id, true);
     }
 
     if (loop_cb_) {
