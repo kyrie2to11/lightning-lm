@@ -81,7 +81,15 @@ static Metrics AttitudeMetrics(
     const std::string& phase, const Mat3d& R_world_imu, const Mat3d& R_imu_base);
 ```
 
-在 `.cc` 用 Eigen `eulerAngles(2, 1, 0)`，转换为 degree并映射为 roll/pitch/yaw；base矩阵严格使用：
+在 `.cc` 用显式 ZYX 公式计算并转换为 degree，避免 Eigen欧拉角在等价分支间跳变：
+
+```cpp
+yaw = std::atan2(R(1, 0), R(0, 0));
+pitch = std::atan2(-R(2, 0), std::hypot(R(0, 0), R(1, 0)));
+roll = std::atan2(R(2, 1), R(2, 2));
+```
+
+base矩阵严格使用：
 
 ```cpp
 const Mat3d R_world_base = R_world_imu * R_imu_base;
