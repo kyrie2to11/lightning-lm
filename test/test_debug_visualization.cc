@@ -1,3 +1,5 @@
+#include <cmath>
+
 #include <gtest/gtest.h>
 
 #include "common/debug_visualization.h"
@@ -44,6 +46,30 @@ TEST(DebugVisualizationParams, RejectsInvalidEnabledStride) {
     params.live_cloud_every_n_frames = 0;
 
     EXPECT_THROW(DebugVisualization::Validate(params), std::invalid_argument);
+}
+
+TEST(DebugVisualizationAttitude, IdentityExtrinsicKeepsImuAndBaseEqual) {
+    const Mat3d R_world_imu =
+        Eigen::AngleAxisd(35.0 * M_PI / 180.0, Vec3d::UnitZ()).toRotationMatrix();
+
+    const auto attitude =
+        DebugVisualization::ToAttitudeDegrees(R_world_imu, Mat3d::Identity());
+
+    EXPECT_NEAR(attitude.imu_yaw_deg, 35.0, 1e-9);
+    EXPECT_NEAR(attitude.base_yaw_deg, 35.0, 1e-9);
+}
+
+TEST(DebugVisualizationAttitude, ComposesRuntimeImuFromBaseRotation) {
+    const Mat3d R_world_imu =
+        Eigen::AngleAxisd(30.0 * M_PI / 180.0, Vec3d::UnitZ()).toRotationMatrix();
+    const Mat3d R_imu_base =
+        Eigen::AngleAxisd(20.0 * M_PI / 180.0, Vec3d::UnitZ()).toRotationMatrix();
+
+    const auto attitude =
+        DebugVisualization::ToAttitudeDegrees(R_world_imu, R_imu_base);
+
+    EXPECT_NEAR(attitude.imu_yaw_deg, 30.0, 1e-9);
+    EXPECT_NEAR(attitude.base_yaw_deg, 50.0, 1e-9);
 }
 
 }  // namespace

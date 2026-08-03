@@ -23,6 +23,15 @@ namespace lightning {
 /// false, no publishers are created and call sites return before copying data.
 class DebugVisualization {
    public:
+    struct AttitudeDegrees {
+        double imu_roll_deg = 0.0;
+        double imu_pitch_deg = 0.0;
+        double imu_yaw_deg = 0.0;
+        double base_roll_deg = 0.0;
+        double base_pitch_deg = 0.0;
+        double base_yaw_deg = 0.0;
+    };
+
     struct Params {
         bool live_cloud_enabled = false;
         int live_cloud_every_n_frames = 10;
@@ -39,6 +48,10 @@ class DebugVisualization {
     static void Validate(const Params& params);
     static bool ShouldPublishCloud(const Params& params, std::uint64_t frame_id, bool force);
     static bool ShouldPublishTimeseries(const Params& params, std::uint64_t frame_id, bool force);
+    static AttitudeDegrees ToAttitudeDegrees(
+        const Mat3d& R_world_imu, const Mat3d& R_imu_base);
+    static Metrics AttitudeMetrics(
+        const std::string& phase, const Mat3d& R_world_imu, const Mat3d& R_imu_base);
 
     bool cloudEnabled(std::uint64_t frame_id, bool force = false) const;
     bool timeseriesEnabled(std::uint64_t frame_id, bool force = false) const;

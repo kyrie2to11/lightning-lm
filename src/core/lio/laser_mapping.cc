@@ -448,7 +448,10 @@ bool LaserMapping::Run() {
             "frontend/imu_body", *scan_undistort_, imu_frame_id_,
             measures_.lidar_end_time_, debug_frame_id_);
         const auto& predicted = kf_.GetX();
-        debug_visualization_->publishMetrics(
+        auto predicted_metrics = DebugVisualization::AttitudeMetrics(
+            "predicted", predicted.rot_.matrix(), offset_R_lidar_fixed_);
+        predicted_metrics.insert(
+            predicted_metrics.end(),
             {{"state/predicted/px", predicted.pos_.x()},
              {"state/predicted/py", predicted.pos_.y()},
              {"state/predicted/pz", predicted.pos_.z()},
@@ -457,7 +460,9 @@ bool LaserMapping::Run() {
              {"state/predicted/vz", predicted.vel_.z()},
              {"state/predicted/bg_x", predicted.bg_.x()},
              {"state/predicted/bg_y", predicted.bg_.y()},
-             {"state/predicted/bg_z", predicted.bg_.z()}},
+             {"state/predicted/bg_z", predicted.bg_.z()}});
+        debug_visualization_->publishMetrics(
+            predicted_metrics,
             measures_.lidar_end_time_, debug_frame_id_);
     }
 
@@ -668,7 +673,10 @@ bool LaserMapping::Run() {
             measures_.lidar_end_time_, debug_frame_id_);
     }
     if (debug_visualization_) {
-        debug_visualization_->publishMetrics(
+        auto updated_metrics = DebugVisualization::AttitudeMetrics(
+            "updated", state_point_.rot_.matrix(), offset_R_lidar_fixed_);
+        updated_metrics.insert(
+            updated_metrics.end(),
             {{"state/updated/px", state_point_.pos_.x()},
              {"state/updated/py", state_point_.pos_.y()},
              {"state/updated/pz", state_point_.pos_.z()},
@@ -678,7 +686,9 @@ bool LaserMapping::Run() {
              {"frontend/iterations", static_cast<double>(kf_.GetIterations())},
              {"frontend/final_residual_ratio", kf_.GetFinalRes()},
              {"frontend/surface_matches", static_cast<double>(effect_feat_surf_)},
-             {"frontend/icp_matches", static_cast<double>(effect_feat_icp_)}},
+             {"frontend/icp_matches", static_cast<double>(effect_feat_icp_)}});
+        debug_visualization_->publishMetrics(
+            updated_metrics,
             measures_.lidar_end_time_, debug_frame_id_);
     }
 

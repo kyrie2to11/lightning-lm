@@ -8,6 +8,18 @@
 #include <pcl_conversions/pcl_conversions.h>
 
 namespace lightning {
+namespace {
+
+Vec3d ZyxDegrees(const Mat3d& rotation) {
+    constexpr double kRadiansToDegrees = 180.0 / M_PI;
+    const double yaw = std::atan2(rotation(1, 0), rotation(0, 0));
+    const double pitch = std::atan2(
+        -rotation(2, 0), std::hypot(rotation(0, 0), rotation(1, 0)));
+    const double roll = std::atan2(rotation(2, 1), rotation(2, 2));
+    return Vec3d(roll, pitch, yaw) * kRadiansToDegrees;
+}
+
+}  // namespace
 
 DebugVisualization::DebugVisualization(const Params& params, rclcpp::Node::SharedPtr node)
     : params_(params), node_(std::move(node)) {
@@ -43,6 +55,25 @@ bool DebugVisualization::ShouldPublishTimeseries(
     const Params& params, std::uint64_t frame_id, bool force) {
     return params.live_timeseries_enabled &&
            (force || frame_id % static_cast<std::uint64_t>(params.live_timeseries_every_n_frames) == 0);
+}
+
+DebugVisualization::AttitudeDegrees DebugVisualization::ToAttitudeDegrees(
+    const Mat3d& R_world_imu, const Mat3d& R_imu_base) {
+    const Vec3d imu = ZyxDegrees(R_world_imu);
+    const Vec3d base = ZyxDegrees(R_world_imu * R_imu_base);
+    return {imu.x(), imu.y(), imu.z(), base.x(), base.y(), base.z()};
+}
+
+DebugVisualization::Metrics DebugVisualization::AttitudeMetrics(
+    const std::string& phase, const Mat3d& R_world_imu, const Mat3d& R_imu_base) {
+    const AttitudeDegrees attitude = ToAttitudeDegrees(R_world_imu, R_imu_base);
+    const std::string prefix = "state/" + phase + "/";
+    return {{prefix + "imu_roll_deg", attitude.imu_roll_deg},
+            {prefix + "imu_pitch_deg", attitude.imu_pitch_deg},
+            {prefix + "imu_yaw_deg", attitude.imu_yaw_deg},
+            {prefix + "base_roll_deg", attitude.base_roll_deg},
+            {prefix + "base_pitch_deg", attitude.base_pitch_deg},
+            {prefix + "base_yaw_deg", attitude.base_yaw_deg}};
 }
 
 bool DebugVisualization::cloudEnabled(std::uint64_t frame_id, bool force) const {
