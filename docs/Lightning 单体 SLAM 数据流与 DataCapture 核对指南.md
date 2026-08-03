@@ -342,3 +342,67 @@ pcl_pcd2ply \
 - 每次实验使用新的 `output_dir`，避免多个运行结果追加到相同 CSV。
 - `processed_frame_id` 在 `SyncPackages` 成功后分配，所以它代表真正进入处理流程的帧，而不是 ROS 消息序号。
 - 所有 PCD 的坐标系和原始/保存点数都记录在同目录 `metadata.csv`，人工比较前先看该文件。
+
+## 2026-08-03 关键帧航向 Debug 实录
+
+本次使用新 FLU bag：
+
+```text
+/home/jarvis/projects/iRail-Truck/bags/slam_debug_20260730_215238_noned
+```
+
+运行参数为 `base_footprint / before`，开启 DataCapture、在线点云、在线时序、回环和逐关键帧航向监控。普通前端帧每 10 帧捕获一次，关键帧事件不抽样。有效证据目录：
+
+```text
+/tmp/lightning_capture_keyframe_debug_20260803_pausefix
+```
+
+### 首个异常窗口
+
+两条航向都以第一个成功配对的关键帧归零并解包。`odom` 只作为诊断参考，不参与 Lightning 估计。首个 `|updated - odom| >= 10°` 的关键帧为 KF67，rosbag2 已自动暂停成功；随后短暂恢复到 KF70，再次暂停以获得后三帧。
+
+| KF | processed frame | predicted relative yaw | updated relative yaw | odom relative yaw | updated - odom | 同步差 |
+|---:|---:|---:|---:|---:|---:|---:|
+| 64 | 226 | 73.124° | 72.564° | 66.780° | 5.784° | 19.826 ms |
+| 65 | 229 | 70.428° | 69.347° | 62.142° | 7.205° | 0.154 ms |
+| 66 | 231 | 66.133° | 66.668° | 59.504° | 7.164° | 0.166 ms |
+| 67 | 235 | 70.241° | 70.337° | 58.447° | **11.891°** | 19.843 ms |
+| 68 | 239 | 71.139° | 73.405° | 60.823° | 12.583° | 19.847 ms |
+| 69 | 240 | 76.009° | 76.772° | 62.580° | 14.193° | 19.846 ms |
+| 70 | 241 | 80.497° | 80.342° | 66.192° | 14.151° | 0.149 ms |
+
+原始逐关键帧数据见：
+
+```text
+diagnostics/keyframe_yaw_comparison.csv
+```
+
+KF64–KF70 都有 `07_keyframe_body.pcd` 和 `08_keyframe_world_lio.pcd`。KF69 对应 processed frame 240，恰好命中普通帧采样，因此还有完整的 00–08 前端数据：
+
+```text
+frontend/frame_000240/
+```
+
+### 当前可以下的结论
+
+1. KF67 的时间配对差为 19.843 ms，明显小于本次 100 ms 容限；异常不能简单归因于关键帧与 odom 完全错时。
+2. KF67 的 predicted base yaw 已经比 odom 多 11.794°；该帧 ESKF/扫描更新只把航向从 70.241° 改到 70.337°，约 +0.096°。因此误差不是在 KF67 的单次 update 中突然由 0 产生。
+3. KF66 到 KF67 之间有 processed frame 232–234 三个非关键帧。关键帧 CSV 只能证明误差在进入 KF67 更新前已经存在，不能区分它来自这三帧的 IMU 传播还是扫描更新。
+4. KF64–KF70 写入时 `LIOPose` 与初始 `OptPose` 相同，说明这个窗口观察到的是前端航向分歧，不能用 PGO 修正解释。
+5. IMU 原始数据在该窗口主要绕 `gy` 变化，符合已人工确认的 `IMU Y ≈ base Z` 轴对应。但仅凭关键帧采样还不能证明旋转符号、外参方向或状态更新实现一定错误。
+
+### 下一步核对顺序
+
+1. 用 `every_n_frames=1` 重放到同一时间窗，补齐 processed frame 232–235 的 `imu_prediction.csv`、`frontend_result.csv` 和每次 ESKF iteration。
+2. 对每个 0.1 s 帧分别计算：IMU 传播航向增量、predicted→updated 航向修正、odom 航向增量。第一次符号或幅度分叉的阶段就是根因边界。
+3. 在 Lichtblick 对照 02/03/04/05 点云，在 PlotJuggler 同时观察 predicted、updated、odom 和 yaw error；不要只凭单帧世界系 05 的视觉旋转判断外参错误。
+4. 若误差首先出现在 IMU 传播，再核查 `R_imu_base` 的方向和 gyro 变换；若首先出现在 update，再核查残差、法向和有效匹配点分布。
+
+当前回放处于暂停状态。PlotJuggler 的 `Yaw Debug` 页显示：
+
+```text
+/lightning/debug/keyframe_yaw/vector/x  predicted relative yaw
+/lightning/debug/keyframe_yaw/vector/y  updated relative yaw
+/lightning/debug/keyframe_yaw/vector/z  odom relative yaw
+/lightning/debug/keyframe_yaw_error/vector/x  updated - odom
+```
