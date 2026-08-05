@@ -308,6 +308,13 @@ inline void ImuProcess::UndistortPcl(const MeasureGroup &meas, ESKF &kf_state, C
     /*** calculated the pos and attitude prediction at the frame-end ***/
     double note = pcl_end_time > imu_end_time ? 1.0 : -1.0;
     dt = note * (pcl_end_time - imu_end_time);
+    // 与上面逐 IMU 积分的 dt>0.1 防护一致：禁止跨传感器断流时用陈旧测量做长时长外推。
+    // 断流后 imu_end_time 停在断流前，dt 会膨胀到秒级；曾把 -0.35rad/s 的陈旧角速度
+    // 外推 ~2.35s，产生 ~47° 灾难性航向跳变（末段大重影根因）。正常帧此处 dt 仅几毫秒。
+    if (std::abs(dt) > 0.1) {
+        LOG(ERROR) << "tail predict abnormal dt=" << dt << " clamped to sign*0.1";
+        dt = note * 0.1;
+    }
     kf_state.Predict(dt, Q_, gyro, acc);
 
     imu_state = kf_state.GetX();
