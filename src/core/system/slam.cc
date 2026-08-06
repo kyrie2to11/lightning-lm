@@ -279,22 +279,29 @@ bool SlamSystem::ConfigureExtrinsicFromTf(const YAML::Node& yaml) {
         if (init_world_from_tf) {
             const std::string world_frame_id =
                 fasterlio["world_frame_id"] ? fasterlio["world_frame_id"].as<std::string>() : "";
-            if (world_frame_id.empty()) {
-                LOG(ERROR) << "fasterlio.init_world_from_tf requires world_frame_id";
+            const std::string initialization_frame_id = fasterlio["initialization_frame_id"]
+                                                            ? fasterlio["initialization_frame_id"].as<std::string>()
+                                                            : world_frame_id;
+            if (initialization_frame_id.empty()) {
+                LOG(ERROR) << "fasterlio.init_world_from_tf requires initialization_frame_id "
+                              "or world_frame_id";
                 return false;
             }
 
-            if (!wait_for_transform(world_frame_id, imu_frame_id, 5.0)) {
-                LOG(ERROR) << "Timed out waiting for TF " << world_frame_id << " <- " << imu_frame_id;
+            if (!wait_for_transform(initialization_frame_id, imu_frame_id, 5.0)) {
+                LOG(ERROR) << "Timed out waiting for TF " << initialization_frame_id << " <- "
+                           << imu_frame_id;
                 return false;
             }
             const auto world_transform = tf_buffer_->lookupTransform(
-                world_frame_id, imu_frame_id, tf2::TimePointZero, tf2::durationFromSec(0.5));
+                initialization_frame_id, imu_frame_id, tf2::TimePointZero,
+                tf2::durationFromSec(0.5));
             const Eigen::Isometry3d T_world_imu = tf2::transformToEigen(world_transform.transform);
             lio_->SetInitialWorldImuRotation(T_world_imu.rotation());
 
-            LOG(INFO) << "Loaded fasterlio initial world pose from TF: " << world_frame_id << " <- "
-                      << imu_frame_id;
+            LOG(INFO) << "Loaded fasterlio initial world rotation from TF: "
+                      << initialization_frame_id << " <- " << imu_frame_id
+                      << "; output world frame: " << world_frame_id;
         }
     } catch (const tf2::TransformException& ex) {
         LOG(ERROR) << "Failed to lookup fasterlio extrinsic TF " << imu_frame_id << " <- "
@@ -443,15 +450,21 @@ bool SlamSystem::InitMultiBody(const YAML::Node& yaml) {
         fasterlio["init_world_from_tf"] && fasterlio["init_world_from_tf"].as<bool>();
     if (init_world_from_tf) {
         const std::string world_frame = fasterlio["world_frame_id"].as<std::string>();
-        if (!wait_for_tf(world_frame, cfg.leader_imu_frame, 5.0)) {
-            LOG(ERROR) << "Timed out waiting for TF " << world_frame << " <- " << cfg.leader_imu_frame;
+        const std::string initialization_frame = fasterlio["initialization_frame_id"]
+                                                     ? fasterlio["initialization_frame_id"].as<std::string>()
+                                                     : world_frame;
+        if (!wait_for_tf(initialization_frame, cfg.leader_imu_frame, 5.0)) {
+            LOG(ERROR) << "Timed out waiting for TF " << initialization_frame << " <- "
+                       << cfg.leader_imu_frame;
             return false;
         }
-        auto world_tf = tf_buffer_->lookupTransform(world_frame, cfg.leader_imu_frame,
-                                                     tf2::TimePointZero, tf2::durationFromSec(0.5));
+        auto world_tf = tf_buffer_->lookupTransform(initialization_frame, cfg.leader_imu_frame,
+                                                     tf2::TimePointZero,
+                                                     tf2::durationFromSec(0.5));
         Eigen::Isometry3d T_world_imu = tf2::transformToEigen(world_tf.transform);
         lio_->SetInitialWorldImuRotation(T_world_imu.rotation());
-        LOG(INFO) << "Loaded initial world rotation from TF: " << world_frame << " <- " << cfg.leader_imu_frame;
+        LOG(INFO) << "Loaded initial world rotation from TF: " << initialization_frame << " <- "
+                  << cfg.leader_imu_frame << "; output world frame: " << world_frame;
     }
 
     // Pass config + TF buffer to LaserMapping

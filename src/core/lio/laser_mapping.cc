@@ -913,6 +913,16 @@ void LaserMapping::MakeKF() {
 
     if (options_.is_in_slam_mode_) {
         all_keyframes_.emplace_back(kf);
+        if (debug_visualization_) {
+            std::vector<SE3> lio_poses;
+            lio_poses.reserve(all_keyframes_.size());
+            for (const auto& keyframe : all_keyframes_) {
+                lio_poses.emplace_back(keyframe->GetLIOPose());
+            }
+            debug_visualization_->publishPath(
+                "path/lio", lio_poses, world_frame_id_,
+                state_point_.timestamp_, debug_frame_id_, true);
+        }
     }
 
     last_kf_ = kf;

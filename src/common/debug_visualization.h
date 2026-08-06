@@ -8,11 +8,12 @@
 #include <utility>
 #include <vector>
 
-#include <plotjuggler_msgs/msg/data_points.hpp>
-#include <plotjuggler_msgs/msg/dictionary.hpp>
+#include <plotjuggler_msgs/msg/statistics_names.hpp>
+#include <plotjuggler_msgs/msg/statistics_values.hpp>
 #include <nav_msgs/msg/path.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
+#include <std_msgs/msg/float64.hpp>
 
 #include "common/point_def.h"
 #include "common/eigen_types.h"
@@ -70,19 +71,21 @@ class DebugVisualization {
    private:
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr CloudPublisher(
         const std::string& topic_suffix);
-    void PublishDictionary();
+    void PublishNames(double timestamp);
 
     Params params_;
     rclcpp::Node::SharedPtr node_;
     std::unordered_map<std::string, rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr>
         cloud_publishers_;
-    rclcpp::Publisher<plotjuggler_msgs::msg::Dictionary>::SharedPtr dictionary_publisher_;
-    rclcpp::Publisher<plotjuggler_msgs::msg::DataPoints>::SharedPtr metrics_publisher_;
+    rclcpp::Publisher<plotjuggler_msgs::msg::StatisticsNames>::SharedPtr names_publisher_;
+    rclcpp::Publisher<plotjuggler_msgs::msg::StatisticsValues>::SharedPtr values_publisher_;
+    std::unordered_map<std::string, rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr>
+        scalar_publishers_;
     std::unordered_map<std::string, rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr>
         path_publishers_;
     std::unordered_map<std::string, std::uint16_t> metric_indices_;
     std::vector<std::string> metric_names_;
-    std::uint32_t dictionary_uuid_ = 1;
+    std::uint32_t names_version_ = 0;
     std::mutex mutex_;
 };
 

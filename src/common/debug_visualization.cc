@@ -19,6 +19,14 @@ Vec3d ZyxDegrees(const Mat3d& rotation) {
     return Vec3d(roll, pitch, yaw) * kRadiansToDegrees;
 }
 
+builtin_interfaces::msg::Time RosTimestamp(double timestamp) {
+    const auto nanoseconds = static_cast<std::int64_t>(timestamp * 1e9);
+    builtin_interfaces::msg::Time stamp;
+    stamp.sec = static_cast<std::int32_t>(nanoseconds / 1000000000LL);
+    stamp.nanosec = static_cast<std::uint32_t>(nanoseconds % 1000000000LL);
+    return stamp;
+}
+
 }  // namespace
 
 DebugVisualization::DebugVisualization(const Params& params, rclcpp::Node::SharedPtr node)
@@ -28,11 +36,11 @@ DebugVisualization::DebugVisualization(const Params& params, rclcpp::Node::Share
         throw std::invalid_argument("DebugVisualization requires a ROS node when enabled");
     }
     if (params_.live_timeseries_enabled) {
-        auto dictionary_qos = rclcpp::QoS(1).reliable().transient_local();
-        dictionary_publisher_ = node_->create_publisher<plotjuggler_msgs::msg::Dictionary>(
-            "/lightning/debug/metrics/dictionary", dictionary_qos);
-        metrics_publisher_ = node_->create_publisher<plotjuggler_msgs::msg::DataPoints>(
-            "/lightning/debug/metrics/data", rclcpp::QoS(10).best_effort());
+        auto names_qos = rclcpp::QoS(1).reliable().transient_local();
+        names_publisher_ = node_->create_publisher<plotjuggler_msgs::msg::StatisticsNames>(
+            "/lightning/debug/metrics/names", names_qos);
+        values_publisher_ = node_->create_publisher<plotjuggler_msgs::msg::StatisticsValues>(
+            "/lightning/debug/metrics/values", rclcpp::QoS(10).best_effort());
     }
 }
 
@@ -131,11 +139,12 @@ void DebugVisualization::publishCloud(
     CloudPublisher(topic_suffix)->publish(message);
 }
 
-void DebugVisualization::PublishDictionary() {
-    plotjuggler_msgs::msg::Dictionary dictionary;
-    dictionary.dictionary_uuid = dictionary_uuid_;
-    dictionary.names = metric_names_;
-    dictionary_publisher_->publish(dictionary);
+void DebugVisualization::PublishNames(double timestamp) {
+    plotjuggler_msgs::msg::StatisticsNames message;
+    message.header.stamp = RosTimestamp(timestamp);
+    message.names = metric_names_;
+    message.names_version = names_version_;
+    names_publisher_->publish(message);
 }
 
 void DebugVisualization::publishMetrics(
@@ -159,21 +168,29 @@ void DebugVisualization::publishMetrics(
         }
     }
     if (dictionary_changed) {
-        ++dictionary_uuid_;
-        PublishDictionary();
+        ++names_version_;
+        PublishNames(timestamp);
     }
 
-    plotjuggler_msgs::msg::DataPoints message;
-    message.dictionary_uuid = dictionary_uuid_;
-    message.samples.reserve(metrics.size());
+    plotjuggler_msgs::msg::StatisticsValues message;
+    message.header.stamp = RosTimestamp(timestamp);
+    message.names_version = names_version_;
+    message.values.assign(metric_names_.size(),
+                          std::numeric_limits<double>::quiet_NaN());
     for (const auto& [name, value] : metrics) {
-        plotjuggler_msgs::msg::DataPoint sample;
-        sample.name_index = metric_indices_.at(name);
-        sample.stamp = timestamp;
-        sample.value = value;
-        message.samples.push_back(sample);
+        message.values[metric_indices_.at(name)] = value;
+
+        const std::string topic = "/lightning/debug/timeseries/" + name;
+        auto& publisher = scalar_publishers_[topic];
+        if (!publisher) {
+            publisher = node_->create_publisher<std_msgs::msg::Float64>(
+                topic, rclcpp::QoS(10).reliable());
+        }
+        std_msgs::msg::Float64 scalar;
+        scalar.data = value;
+        publisher->publish(scalar);
     }
-    metrics_publisher_->publish(message);
+    values_publisher_->publish(message);
 }
 
 void DebugVisualization::publishPath(
