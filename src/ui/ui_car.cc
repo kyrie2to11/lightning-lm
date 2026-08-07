@@ -20,6 +20,10 @@ void UiCar::SetPose(const SE3& pose) {
 }
 
 void UiCar::Render() {
+    if (dashed_) {
+        glEnable(GL_LINE_STIPPLE);
+        glLineStipple(2, 0x00FF);  // 00001111b：虚实交替
+    }
     glLineWidth(line_width_);
     glBegin(GL_LINES);
 
@@ -37,26 +41,11 @@ void UiCar::Render() {
     glVertex3f(pts_[5][0], pts_[5][1], pts_[5][2]);
     glEnd();
 
-    // 在每个轴端点画标记点
-    glPointSize(8.0f);
-    glColor3f(1.0f, 0.5f, 0.5f);
-    glBegin(GL_POINTS);
-    glVertex3f(pts_[1][0], pts_[1][1], pts_[1][2]);
-    glEnd();
-
-    glColor3f(0.5f, 1.0f, 0.5f);
-    glBegin(GL_POINTS);
-    glVertex3f(pts_[3][0], pts_[3][1], pts_[3][2]);
-    glEnd();
-
-    glColor3f(0.5f, 0.5f, 1.0f);
-    glBegin(GL_POINTS);
-    glVertex3f(pts_[5][0], pts_[5][1], pts_[5][2]);
-    glEnd();
-
     // 恢复默认 state，避免影响后续渲染
-    glPointSize(1.0f);
     glLineWidth(1.0f);
+    if (dashed_) {
+        glDisable(GL_LINE_STIPPLE);
+    }
 }
 
 }  // namespace lightning::ui
