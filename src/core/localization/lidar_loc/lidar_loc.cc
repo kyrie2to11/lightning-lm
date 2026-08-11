@@ -850,11 +850,7 @@ bool LidarLoc::Localize(SE3& pose, double& confidence, CloudPtr input, CloudPtr 
         pcl::io::savePCDFile("./data/tgt.pcd", *tgt);
     }
 
-    if (loc_inited_ == false && confidence > options_.min_init_confidence_) {
-        loc_success = true;
-    } else {
-        loc_success = true;
-    }
+    loc_success = loc_inited_ || confidence > options_.min_init_confidence_;
 
     if (options_.enable_icp_adjust_ && loc_inited_) {
         Eigen::Matrix4f adjust_trans;
