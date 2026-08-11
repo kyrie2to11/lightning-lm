@@ -12,6 +12,10 @@
 #include <tf2_ros/transform_listener.h>
 #include <tf2_eigen/tf2_eigen.hpp>
 
+#include <chrono>
+#include <cmath>
+#include <thread>
+
 namespace lightning {
 
 LocSystem::LocSystem(LocSystem::Options options) : options_(options) {
@@ -62,6 +66,30 @@ bool LocSystem::Init(const std::string &yaml_path) {
             Timer::Evaluate([&]() { ProcessLidar(cloud); }, "Proc Lidar", true);
         });
 
+    initial_pose_sub_ = node_->create_subscription<geometry_msgs::msg::PoseWithCovarianceStamped>(
+        "/initialpose", qos,
+        [this](const geometry_msgs::msg::PoseWithCovarianceStamped::SharedPtr msg) {
+            if (msg->header.frame_id != "map") {
+                LOG(WARNING) << "Ignoring /initialpose in frame '" << msg->header.frame_id
+                             << "'; expected 'map'";
+                return;
+            }
+
+            const auto& pose = msg->pose.pose;
+            Vec3d translation(pose.position.x, pose.position.y, pose.position.z);
+            Eigen::Quaterniond quaternion(
+                pose.orientation.w, pose.orientation.x, pose.orientation.y, pose.orientation.z);
+            if (!translation.allFinite() || !std::isfinite(quaternion.norm()) ||
+                quaternion.norm() < 1e-6) {
+                LOG(WARNING) << "Ignoring invalid /initialpose";
+                return;
+            }
+
+            quaternion.normalize();
+            SetInitPose(SE3(quaternion, translation));
+            LOG(INFO) << "Accepted /initialpose in map frame";
+        });
+
     if (options_.pub_tf_) {
         tf_broadcaster_ = std::make_shared<tf2_ros::TransformBroadcaster>(node_);
         tf_buffer_ = std::make_shared<tf2_ros::Buffer>(node_->get_clock());
@@ -103,6 +131,72 @@ bool LocSystem::Init(const std::string &yaml_path) {
     }
 
     bool ret = loc_->Init(yaml_path, map_path);
+    const auto config = YAML::LoadFile(yaml_path);
+    const auto fasterlio = config["fasterlio"];
+    const bool extrinsic_from_tf =
+        fasterlio["extrinsic_from_tf"] && fasterlio["extrinsic_from_tf"].as<bool>();
+    if (ret && extrinsic_from_tf) {
+        if (!tf_buffer_) {
+            tf_buffer_ = std::make_shared<tf2_ros::Buffer>(node_->get_clock());
+            tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
+        }
+
+        const std::string lidar_frame_id = fasterlio["lidar_frame_id"].as<std::string>("");
+        const std::string imu_frame_id = fasterlio["imu_frame_id"].as<std::string>("");
+        auto wait_for_transform = [&](const std::string& target, const std::string& source) {
+            for (int i = 0; i < 50; ++i) {
+                if (tf_buffer_->canTransform(target, source, tf2::TimePointZero)) return true;
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+            return tf_buffer_->canTransform(target, source, tf2::TimePointZero);
+        };
+
+        try {
+            if (lidar_frame_id.empty() || imu_frame_id.empty() ||
+                !wait_for_transform(imu_frame_id, lidar_frame_id)) {
+                LOG(ERROR) << "Failed to resolve localization LIO extrinsic TF "
+                           << imu_frame_id << " <- " << lidar_frame_id;
+                ret = false;
+            } else {
+                const auto transform = tf_buffer_->lookupTransform(
+                    imu_frame_id, lidar_frame_id, tf2::TimePointZero,
+                    tf2::durationFromSec(0.5));
+                const Eigen::Isometry3d T_imu_lidar = tf2::transformToEigen(transform.transform);
+                loc_->SetLidarExtrinsic(T_imu_lidar.translation(), T_imu_lidar.rotation());
+                LOG(INFO) << "Loaded localization LIO extrinsic from TF: " << imu_frame_id
+                          << " <- " << lidar_frame_id;
+
+                const bool init_world_from_tf =
+                    fasterlio["init_world_from_tf"] && fasterlio["init_world_from_tf"].as<bool>();
+                if (init_world_from_tf) {
+                    const std::string world_frame_id =
+                        fasterlio["world_frame_id"].as<std::string>("");
+                    const std::string initialization_frame_id =
+                        fasterlio["initialization_frame_id"]
+                            ? fasterlio["initialization_frame_id"].as<std::string>()
+                            : world_frame_id;
+                    if (initialization_frame_id.empty() ||
+                        !wait_for_transform(initialization_frame_id, imu_frame_id)) {
+                        LOG(ERROR) << "Failed to resolve localization initial world TF "
+                                   << initialization_frame_id << " <- " << imu_frame_id;
+                        ret = false;
+                    } else {
+                        const auto world_transform = tf_buffer_->lookupTransform(
+                            initialization_frame_id, imu_frame_id, tf2::TimePointZero,
+                            tf2::durationFromSec(0.5));
+                        const Eigen::Isometry3d T_world_imu =
+                            tf2::transformToEigen(world_transform.transform);
+                        loc_->SetInitialWorldImuRotation(T_world_imu.rotation());
+                        LOG(INFO) << "Loaded localization initial world rotation from TF: "
+                                  << initialization_frame_id << " <- " << imu_frame_id;
+                    }
+                }
+            }
+        } catch (const tf2::TransformException& ex) {
+            LOG(ERROR) << "Failed to configure localization LIO from TF: " << ex.what();
+            ret = false;
+        }
+    }
     if (ret) {
         LOG(INFO) << "online loc node has been created.";
     }

@@ -101,18 +101,22 @@ bool LaserMapping::Init(const std::string &config_yaml) {
 
 void LaserMapping::SetExtrinsic(const Vec3d &translation, const Mat3d &rotation) {
     offset_t_lidar_fixed_ = translation;
-    offset_R_lidar_fixed_ = rotation;
+    // TF quaternions serialized with limited precision can yield a matrix that is
+    // microscopically non-orthogonal.  Sophus intentionally rejects such matrices,
+    // so normalize once at this external-data boundary.
+    offset_R_lidar_fixed_ = Eigen::Quaterniond(rotation).normalized().toRotationMatrix();
 
     extrinT_ = {translation.x(), translation.y(), translation.z()};
-    extrinR_ = {rotation(0, 0), rotation(0, 1), rotation(0, 2),
-                rotation(1, 0), rotation(1, 1), rotation(1, 2),
-                rotation(2, 0), rotation(2, 1), rotation(2, 2)};
+    extrinR_ = {offset_R_lidar_fixed_(0, 0), offset_R_lidar_fixed_(0, 1), offset_R_lidar_fixed_(0, 2),
+                offset_R_lidar_fixed_(1, 0), offset_R_lidar_fixed_(1, 1), offset_R_lidar_fixed_(1, 2),
+                offset_R_lidar_fixed_(2, 0), offset_R_lidar_fixed_(2, 1), offset_R_lidar_fixed_(2, 2)};
 
     p_imu_->SetExtrinsic(offset_t_lidar_fixed_, offset_R_lidar_fixed_);
 }
 
 void LaserMapping::SetInitialWorldImuRotation(const Mat3d &R_world_imu) {
-    p_imu_->SetInitialWorldImuRotation(R_world_imu);
+    p_imu_->SetInitialWorldImuRotation(
+        Eigen::Quaterniond(R_world_imu).normalized().toRotationMatrix());
 }
 
 bool LaserMapping::LoadParamsFromYAML(const std::string &yaml_file) {
@@ -220,7 +224,8 @@ bool LaserMapping::LoadParamsFromYAML(const std::string &yaml_file) {
     voxel_scan_.setLeafSize(filter_size_scan, filter_size_scan, filter_size_scan);
 
     offset_t_lidar_fixed_ = math::VecFromArray<double>(extrinT_);
-    offset_R_lidar_fixed_ = math::MatFromArray<double>(extrinR_);
+    offset_R_lidar_fixed_ = Eigen::Quaterniond(math::MatFromArray<double>(extrinR_))
+                                .normalized().toRotationMatrix();
 
     p_imu_->SetExtrinsic(offset_t_lidar_fixed_, offset_R_lidar_fixed_);
     p_imu_->SetGyrCov(Vec3d(gyr_cov, gyr_cov, gyr_cov));
@@ -823,7 +828,8 @@ void LaserMapping::ProjectKFs(CloudPtr cloud, int size_limit) {
         // LOG(INFO) << "projecting kf: " << kf->GetID();
         // if (last_kf_) {
         // auto kf = last_kf_;
-        SE3 pose = pose_cur * kf->GetLIOPose() * SE3(offset_R_lidar_fixed_, offset_t_lidar_fixed_);
+        // Keyframe clouds are already expressed in the IMU body frame by ImuProcess.
+        SE3 pose = pose_cur * kf->GetLIOPose();
 
         int cnt = 0;
         for (auto &pt : kf->GetCloud()->points) {

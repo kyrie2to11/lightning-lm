@@ -35,6 +35,7 @@ bool Localization::Init(const std::string& yaml_path, const std::string& global_
         LOG(ERROR) << "failed to init lio";
         return false;
     }
+    SetLidarExtrinsic(lio_->GetExtrinsicTranslation(), lio_->GetExtrinsicRotation());
 
     /// 激光定位
     LidarLoc::Options lidar_loc_options;
@@ -94,6 +95,8 @@ bool Localization::Init(const std::string& yaml_path, const std::string& global_
         //         }
 
         loc_result_ = res;
+        loc_result_.pose_ = res.pose_ * T_imu_lidar_;
+        loc_result_.vel_b_ = T_imu_lidar_.so3().inverse() * res.vel_b_;
 
         if (tf_callback_ && loc_result_.valid_) {
             tf_callback_(loc_result_.ToGeoMsg());
@@ -130,11 +133,27 @@ bool Localization::Init(const std::string& yaml_path, const std::string& global_
     } else if (lidar_type == 4) {
         preprocess_->SetLidarType(LidarType::ROBOSENSE);
         LOG(INFO) << "Using OUST 64 Lidar";
+    } else if (lidar_type == 5) {
+        preprocess_->SetLidarType(LidarType::POLKA_MERGED);
+        LOG(INFO) << "Using pre-deskewed Polka merged cloud";
     } else {
         LOG(WARNING) << "unknown lidar_type";
     }
 
     return true;
+}
+
+void Localization::SetLidarExtrinsic(const Vec3d& translation, const Mat3d& rotation) {
+    if (lio_) {
+        T_imu_lidar_ = SE3(Eigen::Quaterniond(rotation).normalized(), translation);
+        lio_->SetExtrinsic(translation, rotation);
+    }
+}
+
+void Localization::SetInitialWorldImuRotation(const Mat3d& rotation) {
+    if (lio_) {
+        lio_->SetInitialWorldImuRotation(rotation);
+    }
 }
 
 void Localization::ProcessLidarMsg(const sensor_msgs::msg::PointCloud2::SharedPtr cloud) {
@@ -329,7 +348,9 @@ void Localization::ProcessIMUMsg(IMUPtr imu) {
 // }
 
 void Localization::Finish() {
-    lidar_loc_->Finish();
+    if (lidar_loc_) {
+        lidar_loc_->Finish();
+    }
     if (ui_) {
         ui_->Quit();
     }
@@ -342,7 +363,8 @@ void Localization::SetExternalPose(const Eigen::Quaterniond& q, const Eigen::Vec
     UL lock(global_mutex_);
     /// 设置外部重定位的pose
     if (lidar_loc_) {
-        lidar_loc_->SetInitialPose(SE3(q, t));
+        const SE3 external_base_pose(q, t);
+        lidar_loc_->SetInitialPose(external_base_pose * T_imu_lidar_.inverse());
     }
 }
 

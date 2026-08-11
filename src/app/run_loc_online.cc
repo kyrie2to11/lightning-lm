@@ -27,10 +27,11 @@ int main(int argc, char** argv) {
 
     if (!loc.Init(FLAGS_config)) {
         LOG(ERROR) << "failed to init loc";
+        rclcpp::shutdown();
+        return 1;
     }
 
-    /// 默认起点开始定位
-    loc.SetInitPose(SE3());
+    LOG(INFO) << "Waiting for /initialpose before starting localization";
     loc.Spin();
 
     rclcpp::shutdown();

@@ -52,6 +52,9 @@ class Localization {
      */
     bool Init(const std::string& yaml_path, const std::string& global_map_path);
 
+    void SetLidarExtrinsic(const Vec3d& translation, const Mat3d& rotation);
+    void SetInitialWorldImuRotation(const Mat3d& rotation);
+
     /// 处理lidar消息
     void ProcessLidarMsg(const sensor_msgs::msg::PointCloud2::SharedPtr laser_msg);
     void ProcessLivoxLidarMsg(const livox_ros_driver2::msg::CustomMsg::SharedPtr laser_msg);
@@ -99,6 +102,7 @@ class Localization {
     /// 前端
     std::shared_ptr<LaserMapping> lio_ = nullptr;
     Keyframe::Ptr lio_kf_ = nullptr;
+    SE3 T_imu_lidar_;  // internal IMU frame <- external base/LiDAR frame
 
     // ui
     std::shared_ptr<ui::PangolinWindow> ui_ = nullptr;
