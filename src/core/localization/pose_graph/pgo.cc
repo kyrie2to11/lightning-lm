@@ -25,6 +25,8 @@ void PGO::SetHighFrequencyGlobalOutputHandleFunction(PGO::GlobalOutputHandleFunc
     high_freq_output_func_ = std::move(handle);
 }
 
+void PGO::SetOutputExtrinsic(const SE3& T_imu_output) { T_imu_output_ = T_imu_output; }
+
 void PGO::PubResult() {
     // 在有需要时，高频外推然后向外发送数据
     if (high_freq_output_func_ && impl_->result_.valid_) {
@@ -98,13 +100,14 @@ void PGO::PubResult() {
             }
         }
 
-        // 平滑器使用已经过连续性约束的外推位姿。直接使用原始 IMU
-        // 平移预测会把 LiDAR 两帧之间的短时漂移再次注入输出。
-        smoother_->PushDRPose(result.pose_);
+        // 平滑器必须与对外轨迹使用同一参考点。若在 IMU 原点分别平滑旋转和平移，
+        // 再乘带平移的外参，会把姿态噪声重新变成 base 参考点的横向摆动。
+        SE3 output_reference_pose = result.pose_ * T_imu_output_;
+        smoother_->PushDRPose(output_reference_pose);
 
         SE3 extra_pose = result.pose_;
-        smoother_->PushPose(result.pose_);
-        result.pose_ = smoother_->GetPose();
+        smoother_->PushPose(output_reference_pose);
+        result.pose_ = smoother_->GetPose() * T_imu_output_.inverse();
 
         // 输出force 2d
         // common::PoseRPY RPYXYZ = common::math::SE3ToRollPitchYaw(smoother_->GetPose());
@@ -460,9 +463,15 @@ bool PGO::ExtrapolateLocResult(LocalizationResult& output_result) {
             const double dt = latest_dr.timestamp_ - latest_lo.timestamp_;
             if (dt >= 0.0 && dt <= 0.5) {
                 const SO3 map_from_lio_rotation = output_result.pose_.so3() * latest_lo.GetRot().inverse();
-                output_result.pose_.translation() += map_from_lio_rotation * latest_lo.GetVel() * dt;
-                output_result.pose_.so3() =
+                const SO3 extrapolated_imu_rotation =
                     output_result.pose_.so3() * (latest_lo.GetRot().inverse() * latest_dr.GetRot());
+                const SE3 output_pose_at_lidar = output_result.pose_ * T_imu_output_;
+                const Vec3d output_velocity_world = map_from_lio_rotation * latest_lo.GetVel();
+                const Vec3d extrapolated_output_translation =
+                    output_pose_at_lidar.translation() + output_velocity_world * dt;
+                const SE3 extrapolated_output_pose(
+                    extrapolated_imu_rotation * T_imu_output_.so3(), extrapolated_output_translation);
+                output_result.pose_ = extrapolated_output_pose * T_imu_output_.inverse();
                 output_result.timestamp_ = latest_dr.timestamp_;
             }
         } else {

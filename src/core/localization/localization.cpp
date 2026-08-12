@@ -181,6 +181,9 @@ void Localization::SetLidarExtrinsic(const Vec3d& translation, const Mat3d& rota
     if (lio_) {
         T_imu_lidar_ = SE3(Eigen::Quaterniond(rotation).normalized(), translation);
         lio_->SetExtrinsic(translation, rotation);
+        if (pgo_) {
+            pgo_->SetOutputExtrinsic(T_imu_lidar_);
+        }
     }
 }
 

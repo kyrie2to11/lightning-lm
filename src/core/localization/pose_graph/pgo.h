@@ -37,6 +37,7 @@ class PGO {
     using GlobalOutputHandleFunction = std::function<void(const LocalizationResult& output_result)>;
     void SetGlobalOutputHandleFunction(GlobalOutputHandleFunction handle);
     void SetHighFrequencyGlobalOutputHandleFunction(GlobalOutputHandleFunction handle);
+    void SetOutputExtrinsic(const SE3& T_imu_output);
 
     /// 处理lidarOdom信息
     bool ProcessDR(const NavState& dr_result);
@@ -94,6 +95,7 @@ class PGO {
     LocalizationResult parking_result_;
 
     std::shared_ptr<PoseSmoother> smoother_;
+    SE3 T_imu_output_;
 
     // LiDAR 校正会重建并回放 IMU 状态。高频外推必须从最新的 LiDAR
     // 校正分支重新开始，不能把校正前后的 IMU 状态差当成车辆运动。
