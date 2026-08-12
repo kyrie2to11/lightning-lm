@@ -391,7 +391,9 @@ void PGOImpl::AddLidarOdomFactors() {
 
         /// 这个e仍然需要robust kernel
         auto rk = std::make_shared<miao::RobustKernelCauchy>();
-        rk->SetDelta(options_.lidar_odom_ang_noise);
+        // EdgeSE3 的 chi2 已由位置/角度协方差归一化；鲁棒核阈值必须是
+        // 无量纲的标准化残差尺度，不能再传入以弧度表示的角噪声。
+        rk->SetDelta(options_.lidar_odom_robust_delta);
         e->SetRobustKernel(rk);
 
         optimizer_->AddEdge(e);

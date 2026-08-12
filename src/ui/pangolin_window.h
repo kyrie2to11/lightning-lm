@@ -43,6 +43,9 @@ class PangolinWindow {
     /// 更新最新的pose
     void UpdateRecentPose(const SE3& pose);
 
+    /// 更新低频 PGO 优化帧，仅用于与高频最终位姿、NDT 观测对比。
+    void UpdateOptimizedPose(const SE3& pose);
+
     void UpdatePredictPose(const SE3& pose);
 
     /// 更新一次scan和它对应的Pose

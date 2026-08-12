@@ -73,6 +73,12 @@ void PangolinWindow::UpdateRecentPose(const SE3& pose) {
     impl_->newest_frontend_pose_ = pose;
 }
 
+void PangolinWindow::UpdateOptimizedPose(const SE3& pose) {
+    std::lock_guard<std::mutex> lock(impl_->mtx_nav_state_);
+    impl_->optimized_pgo_pose_ = pose;
+    impl_->optimized_pgo_need_update_.store(true);
+}
+
 void PangolinWindow::UpdatePredictPose(const SE3& pose) {
     UL lock(impl_->mtx_nav_state_);
     impl_->predicted_pose_ = pose;

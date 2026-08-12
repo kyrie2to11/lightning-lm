@@ -60,6 +60,16 @@ class PoseSmoother {
         if (motion_effective_) {
             if (n >= 2) {
                 motion = dr_queue_[n - 2].inverse() * dr_queue_[n - 1];
+                const Vec3d dr_rotation_increment = motion.so3().log();
+                if (!has_filtered_dr_rotation_increment_) {
+                    filtered_dr_rotation_increment_ = dr_rotation_increment;
+                    has_filtered_dr_rotation_increment_ = true;
+                } else {
+                    filtered_dr_rotation_increment_ =
+                        (1.0 - dr_rotation_filter_factor_) * filtered_dr_rotation_increment_ +
+                        dr_rotation_filter_factor_ * dr_rotation_increment;
+                }
+                motion.so3() = SO3::exp(filtered_dr_rotation_increment_);
             } else {
                 motion = SE3();
             }
@@ -103,10 +113,20 @@ class PoseSmoother {
 
     SE3 GetPose() const { return output_pose_; }
 
+    void ClearDRMotion() {
+        UL lock(data_mutex_);
+        dr_queue_.clear();
+        motion_effective_ = false;
+        has_filtered_dr_rotation_increment_ = false;
+        filtered_dr_rotation_increment_.setZero();
+    }
+
     void Reset() {
         UL lock(data_mutex_);
         pose_queue_.clear();
         motion_effective_ = false;
+        has_filtered_dr_rotation_increment_ = false;
+        filtered_dr_rotation_increment_.setZero();
     }
 
    private:
@@ -118,6 +138,9 @@ class PoseSmoother {
     double smoother_trans_limit_ = 5.0;     // 平滑器从输入到输出允许的最大平移量
     double smoother_trans_limit2_ = 2.0;    // 平滑器从输入到输出允许的最大平移量
     double smoother_dr_limit_trans_ = 0.3;  // 平滑器允许的DR跳变量
+    double dr_rotation_filter_factor_ = 0.2;  // 高频 DR 旋转增量低通系数
+    bool has_filtered_dr_rotation_increment_ = false;
+    Vec3d filtered_dr_rotation_increment_ = Vec3d::Zero();
     SE3 output_pose_;
 
     std::deque<SE3> pose_queue_;  // 平滑之后的

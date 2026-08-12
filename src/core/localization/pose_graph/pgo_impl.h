@@ -110,6 +110,7 @@ struct PGOImpl {
         double lidar_odom_pos_noise = 0.3;                            // LidarOdom相对定位位置噪声
         double lidar_odom_ang_noise = 1.0 * constant::kDEG2RAD;       // LidarOdom相对定位角度噪声
         double lidar_odom_outlier_th = 0.01;                          // LidarOdom异常值检测
+        double lidar_odom_robust_delta = 3.0;                         // 归一化残差的 Cauchy 阈值
         double dr_pos_noise = 1.0;                                    // DR相对定位位置噪声 // 0.05
         double dr_ang_noise = 0.5 * constant::kDEG2RAD;               // DR相对定位角度噪声
         double dr_pos_noise_ratio = 1.0;                              // DR位置噪声倍率

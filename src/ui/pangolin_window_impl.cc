@@ -27,6 +27,7 @@ bool PangolinWindowImpl::Init() {
     // 雷达定位轨迹opengl设置
     traj_newest_state_.reset(new ui::UiTrajectory(Vec3f(1.0, 0.0, 0.0)));  // 红色
     traj_scans_.reset(new ui::UiTrajectory(Vec3f(0.0, 1.0, 0.0)));         // 绿色
+    traj_optimized_pgo_.reset(new ui::UiTrajectory(Vec3f(1.0, 1.0, 0.0))); // 黄色
 
     current_scan_.reset(new PointCloudType);  // 重置pcl点云指针
     current_scan_ui_.reset(new ui::UiCloud);  // 重置用于渲染的点云指针
@@ -198,6 +199,17 @@ bool PangolinWindowImpl::UpdateState() {
     return false;
 }
 
+bool PangolinWindowImpl::UpdateOptimizedPgo() {
+    if (!optimized_pgo_need_update_.load()) {
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lock(mtx_nav_state_);
+    traj_optimized_pgo_->AddPt(optimized_pgo_pose_);
+    optimized_pgo_need_update_.store(false);
+    return true;
+}
+
 void PangolinWindowImpl::DrawAll() {
     /// 地图
     for (const auto &pc : cloud_map_ui_) {
@@ -225,9 +237,7 @@ void PangolinWindowImpl::DrawAll() {
 
     if (draw_backend_traj_) {
         traj_scans_->Render();
-        // 车
-        backend_car_.SetPose(newest_backend_pose_);
-        backend_car_.Render();
+        traj_optimized_pgo_->Render();
     }
 
     // pred_car_.SetPose(predicted_pose_);
@@ -266,6 +276,7 @@ void PangolinWindowImpl::RenderClouds() {
     UpdateGlobalMap();
     UpdateDynamicMap();
     UpdateState();
+    UpdateOptimizedPgo();
     UpdateCurrentScan();
 
     // 绘制

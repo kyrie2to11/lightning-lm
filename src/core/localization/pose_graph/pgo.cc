@@ -10,9 +10,9 @@
 
 namespace lightning::loc {
 
-PGO::PGO() : impl_(new PGOImpl), pose_extrapolator_(new PoseExtrapolator) {
-    smoother_ = std::make_shared<PoseSmoother>(pgo::pgo_smooth_factor);
-    LOG(INFO) << "smoother factor: " << pgo::pgo_smooth_factor;
+PGO::PGO(const PGOImpl::Options& options) : impl_(new PGOImpl(options)), pose_extrapolator_(new PoseExtrapolator) {
+    smoother_ = std::make_shared<PoseSmoother>(options.pgo_smooth_factor);
+    LOG(INFO) << "smoother factor: " << options.pgo_smooth_factor;
 }
 
 PGO::~PGO() = default;
@@ -98,12 +98,9 @@ void PGO::PubResult() {
             }
         }
 
-        if (!impl_->dr_pose_queue_.empty()) {
-            smoother_->PushDRPose(impl_->dr_pose_queue_.back().GetPose());
-        }
-
-        impl_->result_.timestamp_ = result.timestamp_;
-        impl_->result_.pose_ = result.pose_;
+        // 平滑器使用已经过连续性约束的外推位姿。直接使用原始 IMU
+        // 平移预测会把 LiDAR 两帧之间的短时漂移再次注入输出。
+        smoother_->PushDRPose(result.pose_);
 
         SE3 extra_pose = result.pose_;
         smoother_->PushPose(result.pose_);
@@ -142,12 +139,15 @@ void PGO::PubResult() {
 
 bool PGO::ProcessDR(const NavState& dr_result) {
     UL lock(impl_->data_mutex_);
+    if (!dr_result.pose_is_ok_ || dr_result.timestamp_ <= 0.0) {
+        LOG(WARNING) << "ignore invalid DR state: valid=" << dr_result.pose_is_ok_
+                     << ", timestamp=" << dr_result.timestamp_;
+        return false;
+    }
     /// 假定DR定位是按时间顺序到达的
-    double delta_timestamp = 0;
     if (!impl_->dr_pose_queue_.empty()) {
         const double last_stamp = impl_->dr_pose_queue_.back().timestamp_;
-        delta_timestamp = dr_result.timestamp_ - last_stamp;
-        if (dr_result.timestamp_ < last_stamp) {
+        if (dr_result.timestamp_ <= last_stamp) {
             LOG(WARNING) << "当前DR定位的结果的时间戳应当比上一个时间戳数值大，实际相减得"
                          << dr_result.timestamp_ - last_stamp;
             return false;
@@ -165,6 +165,32 @@ bool PGO::ProcessDR(const NavState& dr_result) {
     while (impl_->dr_pose_queue_.size() >= pgo::PGO_MAX_SIZE_OF_RELATIVE_POSE_QUEUE) {
         impl_->dr_pose_queue_.pop_front();
     }
+
+    bool high_freq_dr_valid = true;
+    if (!high_freq_dr_pose_queue_.empty()) {
+        const auto& last_dr = high_freq_dr_pose_queue_.back();
+        const double delta_timestamp = dr_result.timestamp_ - last_dr.timestamp_;
+        const double translation_increment =
+            (last_dr.GetPose().inverse() * dr_result.GetPose()).translation().norm();
+        const double max_translation_increment = std::max(0.3, 5.0 * delta_timestamp);
+        if (delta_timestamp <= 0.0 || translation_increment > max_translation_increment) {
+            LOG(WARNING) << "rebase high-frequency DR after discontinuity: dt=" << delta_timestamp
+                         << ", translation=" << translation_increment
+                         << ", threshold=" << max_translation_increment;
+            high_freq_dr_pose_queue_.clear();
+            smoother_->ClearDRMotion();
+            high_freq_dr_valid = false;
+        }
+    }
+    high_freq_dr_pose_queue_.emplace_back(dr_result);
+    while (high_freq_dr_pose_queue_.size() >= pgo::PGO_MAX_SIZE_OF_RELATIVE_POSE_QUEUE) {
+        high_freq_dr_pose_queue_.pop_front();
+    }
+
+    if (!high_freq_dr_valid) {
+        return false;
+    }
+
     if (!impl_->dr_pose_queue_.empty() && !is_parking_) {
         PubResult();
     } else if (is_parking_ && high_freq_output_func_) {
@@ -180,8 +206,9 @@ bool PGO::ProcessLidarOdom(const NavState& lio_result) {
     /// 假定LidarOdom定位是按时间顺序到达的
     if (!impl_->lidar_odom_pose_queue_.empty()) {
         const double last_stamp = impl_->lidar_odom_pose_queue_.back().timestamp_;
-        if (lio_result.timestamp_ < last_stamp) {
+        if (lio_result.timestamp_ <= last_stamp) {
             LOG(WARNING) << "当前LidarOdom定位时间戳回退，实际相减得" << lio_result.timestamp_ - last_stamp;
+            return false;
         }
     }
 
@@ -196,6 +223,14 @@ bool PGO::ProcessLidarOdom(const NavState& lio_result) {
 
     while (impl_->lidar_odom_pose_queue_.size() >= pgo::PGO_MAX_SIZE_OF_RELATIVE_POSE_QUEUE) {
         impl_->lidar_odom_pose_queue_.pop_front();
+    }
+
+    // Run() 已经用这一帧 LiDAR 校正并回放了缓存 IMU。清除旧的高频分支，
+    // 后续 DR 只计算从该校正位姿开始的增量。
+    high_freq_dr_pose_queue_.clear();
+    if (lio_result.pose_is_ok_ && lio_result.timestamp_ > 0.0) {
+        high_freq_dr_pose_queue_.emplace_back(lio_result);
+        smoother_->ClearDRMotion();
     }
 
     if (!lio_result.lidar_odom_reliable_) {
@@ -314,6 +349,7 @@ std::shared_ptr<PGOFrame> PGO::GetCurrentPGOFrame() const { return impl_->curren
 
 bool PGO::Reset() {
     UL lock(impl_->data_mutex_);
+    high_freq_dr_pose_queue_.clear();
     smoother_->Reset();
     return impl_->Reset();
 }
@@ -356,7 +392,7 @@ bool PGO::ExtrapolateLocResult(LocalizationResult& output_result) {
         return false;
     }
 
-    auto& dr_pose_queue = impl_->dr_pose_queue_;
+    auto& dr_pose_queue = high_freq_dr_pose_queue_;
     auto& lo_pose_queue = impl_->lidar_odom_pose_queue_;
     SE3 interp_pose;
     NavState best_match;
@@ -383,24 +419,18 @@ bool PGO::ExtrapolateLocResult(LocalizationResult& output_result) {
         imu_interruption_tag_ = false;
     }
 
-    // 用LO外推到最新时刻
-    // if (impl_->lidar_odom_valid_ && !lo_pose_queue.empty() &&
-    //     lo_pose_queue.back().timestamp_ > output_result.timestamp_) {
-    //     bool lo_interp_success = roki::common::math::PoseInterp<NavState>(
-    //         output_result.timestamp_, lo_pose_queue,
-    //         [](const NavState& nav_state) { return nav_state.timestamp_; },
-    //         [](const NavState& nav_state) { return nav_state.pose_; }, interp_pose, best_match);
-    //     if (lo_interp_success) {
-    //         SE3 pose_incre = interp_pose.inverse() * lo_pose_queue.back().pose_;
-    //         output_result.pose_ = output_result.pose_ * pose_incre;
-    //         const double time_incre = lo_pose_queue.back().timestamp_ - output_result.timestamp_;
-    //         output_result.timestamp_ = lo_pose_queue.back().timestamp_;
-    //         // 如果外推时间比较久(比如超过3s)，跟踪状态改为跟踪相对位姿
-    //         if (time_incre > 3.0) {
-    //             output_result.status_ = common::GlobalPoseStatus::FOLLOWING_LiDAR_ODOM;
-    //         }
-    //     }
-    // }
+    // 先沿连续的 LiDAR Odom 从 PGO 锚点外推到最新 LiDAR 校正时刻。
+    if (!lo_pose_queue.empty() && lo_pose_queue.back().timestamp_ > output_result.timestamp_) {
+        const bool lo_interp_success = math::PoseInterp<NavState>(
+            output_result.timestamp_, lo_pose_queue,
+            [](const NavState& nav_state) { return nav_state.timestamp_; },
+            [](const NavState& nav_state) { return nav_state.GetPose(); }, interp_pose, best_match);
+        if (lo_interp_success) {
+            const SE3 pose_incre = interp_pose.inverse() * lo_pose_queue.back().GetPose();
+            output_result.pose_ = output_result.pose_ * pose_incre;
+            output_result.timestamp_ = lo_pose_queue.back().timestamp_;
+        }
+    }
 
     // if (impl_->lidar_odom_conflict_with_dr_ && impl_->lidar_odom_valid_) {
     //     /// 用LO外推到DR时刻
@@ -419,37 +449,32 @@ bool PGO::ExtrapolateLocResult(LocalizationResult& output_result) {
     //     }
     // }
 
-    // 其次用DR做外推
+    // 再从最新 LiDAR 校正时刻外推到当前 IMU 时刻。IMU 的旋转增量可用于
+    // 高频姿态，但其短时平移在本车竖装 IMU 场景会明显发散；平移采用最近
+    // LiDAR 状态的世界系速度作常速度外推。
 
     if (!dr_pose_queue.empty() && dr_pose_queue.back().timestamp_ > output_result.timestamp_) {
-        double dr_extrap_time = dr_pose_queue.back().timestamp_ - output_result.timestamp_;  // DR 递推的时间
-
-        /// NOTE 当LO失效，lidar loc有较大延时，可能需要DR递推较久的时间
-
-        double dr_pose_inc_th = 5.0 * dr_extrap_time;  // 允许DR外推的距离
-        if (!impl_->lidar_odom_valid_) {
-            dr_pose_inc_th *= 2;  // lidar odom invalid，放宽
-        }
-        if (dr_pose_inc_th < 2.0) {
-            dr_pose_inc_th = 2.0;
-        }
-
-        bool dr_interp_success = math::PoseInterp<NavState>(
-            output_result.timestamp_, dr_pose_queue, [](const NavState& nav_state) { return nav_state.timestamp_; },
-            [](const NavState& nav_state) { return nav_state.GetPose(); }, interp_pose, best_match);
-        if (dr_interp_success) {
-            SE3 pose_incre = interp_pose.inverse() * dr_pose_queue.back().GetPose();
-
-            /// 限制此处的pose incre大小
-            // if (pose_incre.translation().norm() > dr_pose_inc_th) {
-            //     LOG(WARNING) << "pose increment is too large: " << pose_incre.translation().norm()
-            //               << ", skip extrapolate, dt=" << dr_extrap_time << ", th: " << dr_pose_inc_th;
-            //     return true;
-            // }
-
-            output_result.pose_ = output_result.pose_ * pose_incre;
-            const double time_incre = dr_pose_queue.back().timestamp_ - output_result.timestamp_;
-            output_result.timestamp_ = dr_pose_queue.back().timestamp_;
+        const auto& latest_dr = dr_pose_queue.back();
+        if (!lo_pose_queue.empty() && lo_pose_queue.back().timestamp_ <= latest_dr.timestamp_) {
+            const auto& latest_lo = lo_pose_queue.back();
+            const double dt = latest_dr.timestamp_ - latest_lo.timestamp_;
+            if (dt >= 0.0 && dt <= 0.5) {
+                const SO3 map_from_lio_rotation = output_result.pose_.so3() * latest_lo.GetRot().inverse();
+                output_result.pose_.translation() += map_from_lio_rotation * latest_lo.GetVel() * dt;
+                output_result.pose_.so3() =
+                    output_result.pose_.so3() * (latest_lo.GetRot().inverse() * latest_dr.GetRot());
+                output_result.timestamp_ = latest_dr.timestamp_;
+            }
+        } else {
+            const bool dr_interp_success = math::PoseInterp<NavState>(
+                output_result.timestamp_, dr_pose_queue,
+                [](const NavState& nav_state) { return nav_state.timestamp_; },
+                [](const NavState& nav_state) { return nav_state.GetPose(); }, interp_pose, best_match);
+            if (dr_interp_success) {
+                const SE3 pose_incre = interp_pose.inverse() * latest_dr.GetPose();
+                output_result.pose_ = output_result.pose_ * pose_incre;
+                output_result.timestamp_ = latest_dr.timestamp_;
+            }
         }
     }
 

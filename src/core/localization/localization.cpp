@@ -58,7 +58,23 @@ bool Localization::Init(const std::string& yaml_path, const std::string& global_
     lidar_loc_->Init(yaml_path);
 
     /// pose graph
-    pgo_ = std::make_shared<PGO>();
+    PGOImpl::Options pgo_options;
+    pgo_options.lidar_loc_pos_noise = yaml.GetValue<double>("pgo", "lidar_loc_pos_noise");
+    pgo_options.lidar_loc_ang_noise =
+        yaml.GetValue<double>("pgo", "lidar_loc_ang_noise") * constant::kDEG2RAD;
+    pgo_options.lidar_loc_outlier_th = yaml.GetValue<double>("pgo", "lidar_loc_outlier_th");
+    pgo_options.lidar_odom_pos_noise = yaml.GetValue<double>("pgo", "lidar_odom_pos_noise");
+    pgo_options.lidar_odom_ang_noise =
+        yaml.GetValue<double>("pgo", "lidar_odom_ang_noise") * constant::kDEG2RAD;
+    pgo_options.lidar_odom_robust_delta = yaml.GetValue<double>("pgo", "lidar_odom_robust_delta");
+    pgo_options.dr_pos_noise = yaml.GetValue<double>("pgo", "dr_pos_noise");
+    pgo_options.dr_ang_noise = yaml.GetValue<double>("pgo", "dr_ang_noise") * constant::kDEG2RAD;
+    pgo_options.dr_pos_noise_ratio = yaml.GetValue<double>("pgo", "dr_pos_noise_ratio");
+    pgo_options.pgo_frame_converge_pos_th = yaml.GetValue<double>("pgo", "pgo_frame_converge_pos_th");
+    pgo_options.pgo_frame_converge_ang_th =
+        yaml.GetValue<double>("pgo", "pgo_frame_converge_ang_th") * constant::kDEG2RAD;
+    pgo_options.pgo_smooth_factor = yaml.GetValue<double>("pgo", "smooth_factor");
+    pgo_ = std::make_shared<PGO>(pgo_options);
     pgo_->SetDebug(false);
 
     ///  各模块的异步调用
@@ -87,7 +103,22 @@ bool Localization::Init(const std::string& yaml_path, const std::string& global_
         lidar_loc_proc_cloud_.Start();
     }
 
-    /// TODO: 发布
+    // Pangolin 中的红色轨迹表示真正的 PGO 优化结果。高频外推结果仍用于
+    // 对外发布，但不参与该轨迹，避免把 DR/IMU 外推抖动误认为 PGO 抖动。
+    pgo_->SetGlobalOutputHandleFunction([this](const LocalizationResult& res) {
+        if (!ui_ || !res.valid_) {
+            return;
+        }
+
+        LocalizationResult optimized_result = res;
+        LOG(INFO) << std::setprecision(14) << std::fixed << "PGO optimized [" << res.pose_.translation().transpose()
+                  << "], t=" << res.timestamp_;
+        optimized_result.pose_ = res.pose_ * T_imu_lidar_;
+        optimized_result.vel_b_ = T_imu_lidar_.so3().inverse() * res.vel_b_;
+        ui_->UpdateOptimizedPose(optimized_result.pose_);
+    });
+
+    /// 对外发布高频定位结果
     pgo_->SetHighFrequencyGlobalOutputHandleFunction([this](const LocalizationResult& res) {
         // if (loc_result_.timestamp_ > 0) {
         //             double loc_fps = 1.0 / (res.timestamp_ - loc_result_.timestamp_);
@@ -97,12 +128,15 @@ bool Localization::Init(const std::string& yaml_path, const std::string& global_
         loc_result_ = res;
         loc_result_.pose_ = res.pose_ * T_imu_lidar_;
         loc_result_.vel_b_ = T_imu_lidar_.so3().inverse() * res.vel_b_;
+        LOG_EVERY_N(INFO, 10) << std::setprecision(14) << std::fixed << "HF localization ["
+                              << loc_result_.pose_.translation().transpose() << "], t="
+                              << loc_result_.timestamp_;
 
         if (tf_callback_ && loc_result_.valid_) {
             tf_callback_(loc_result_.ToGeoMsg());
         }
 
-        if (ui_) {
+        if (ui_ && loc_result_.valid_) {
             ui_->UpdateNavState(loc_result_.ToNavState());
             ui_->UpdateRecentPose(loc_result_.pose_);
         }

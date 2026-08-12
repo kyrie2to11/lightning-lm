@@ -30,7 +30,7 @@ namespace lightning::loc {
  */
 class PGO {
    public:
-    PGO();
+    explicit PGO(const PGOImpl::Options& options = {});
     ~PGO();
 
     /// 向外输出全局定位结果
@@ -94,6 +94,10 @@ class PGO {
     LocalizationResult parking_result_;
 
     std::shared_ptr<PoseSmoother> smoother_;
+
+    // LiDAR 校正会重建并回放 IMU 状态。高频外推必须从最新的 LiDAR
+    // 校正分支重新开始，不能把校正前后的 IMU 状态差当成车辆运动。
+    std::deque<NavState> high_freq_dr_pose_queue_;
 
     float imu_interruption_time_thd_ = 1.0;  // imu数据断流时间阈值 s
     float lidar_loc_score_thd_ = 0.5;        // 激光定位分值阈值

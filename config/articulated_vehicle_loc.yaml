@@ -134,6 +134,7 @@ pgo:
   lidar_loc_pos_noise: 0.3
   lidar_odom_ang_noise: 1.0
   lidar_odom_pos_noise: 0.3
+  lidar_odom_robust_delta: 3.0
   pgo_frame_converge_ang_th: 1.0
   pgo_frame_converge_pos_th: 0.05
   rtk_fix_ang_noise: 2.0
