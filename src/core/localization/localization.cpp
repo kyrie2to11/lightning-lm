@@ -287,10 +287,8 @@ void Localization::ProcessIMUMsg(IMUPtr imu) {
     last_imu_time_ = this_imu_time;
 
     /// 里程计处理IMU
-    lio_->ProcessIMU(imu);
-
-    /// 这里需要 IMU predict，否则没法process DR了
-    auto dr_state = lio_->GetIMUState();
+    /// 预测和读取必须原子完成，避免 LiDAR 线程在两者之间重建 kf_imu_。
+    auto dr_state = lio_->ProcessIMUAndGetState(imu);
 
     if (!dr_state.pose_is_ok_) {
         return;

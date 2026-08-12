@@ -241,15 +241,23 @@ LaserMapping::LaserMapping(Options options) : options_(options) {
 }
 
 void LaserMapping::ProcessIMU(const lightning::IMUPtr &imu) {
+    ProcessIMUAndGetState(imu);
+}
+
+NavState LaserMapping::ProcessIMUAndGetState(const lightning::IMUPtr &imu) {
+    UL state_lock(mtx_lio_state_);
     publish_count_++;
 
     double timestamp = imu->timestamp;
 
-    UL lock(mtx_buffer_);
-    if (timestamp < last_timestamp_imu_) {
-        LOG(WARNING) << "imu loop back, clear buffer";
-        imu_buffer_.clear();
+    if (timestamp <= last_timestamp_imu_) {
+        LOG(WARNING) << "ignore non-increasing imu timestamp, dt: " << timestamp - last_timestamp_imu_;
+        NavState state;
+        state.pose_is_ok_ = false;
+        return state;
     }
+
+    UL lock(mtx_buffer_);
 
     if (p_imu_->IsIMUInited()) {
         /// 更新最新imu状态
@@ -271,9 +279,18 @@ void LaserMapping::ProcessIMU(const lightning::IMUPtr &imu) {
     }
 
     imu_buffer_.emplace_back(imu);
+
+    if (p_imu_->IsIMUInited()) {
+        return kf_imu_.GetX();
+    }
+
+    NavState state;
+    state.pose_is_ok_ = false;
+    return state;
 }
 
 void LaserMapping::ProcessIMU(const lightning::IMUPtr &imu, int imu_id) {
+    UL state_lock(mtx_lio_state_);
     UL lock(mtx_buffer_);
 
     double timestamp = imu->timestamp;
@@ -335,6 +352,8 @@ void LaserMapping::ProcessPointCloud2(const sensor_msgs::msg::PointCloud2::Share
 }
 
 bool LaserMapping::Run() {
+    UL state_lock(mtx_lio_state_);
+
     // ---- Sync ----
     NavState leader_seed_state;
     double seed_time = 0;
@@ -787,13 +806,15 @@ bool LaserMapping::Run() {
 
     /// 更新kf_for_imu
     kf_imu_ = kf_;
-    if (!measures_.imu_.empty()) {
-        double t = measures_.imu_.back()->timestamp;
-        for (auto &imu : imu_buffer_) {
-            double dt = imu->timestamp - t;
-            kf_imu_.Predict(dt, p_imu_->Q_, imu->angular_velocity, imu->linear_acceleration);
-            t = imu->timestamp;
+    double t = kf_imu_.GetX().timestamp_;
+    for (auto &imu : imu_buffer_) {
+        if (imu->timestamp <= t) {
+            continue;
         }
+
+        double dt = imu->timestamp - t;
+        kf_imu_.Predict(dt, p_imu_->Q_, imu->angular_velocity, imu->linear_acceleration);
+        t = imu->timestamp;
     }
 
     if (ui_) {
@@ -1030,9 +1051,10 @@ void LaserMapping::ProcessPointCloud2(CloudPtr cloud) {
             scan_count_++;
 
             double timestamp = math::ToSec(cloud->header.stamp);
-            if (timestamp < last_timestamp_lidar_) {
-                LOG(ERROR) << "lidar loop back, clear buffer";
-                lidar_buffer_.clear();
+            if (timestamp <= last_timestamp_lidar_) {
+                LOG_EVERY_N(WARNING, 100)
+                    << "ignore non-increasing lidar timestamp, dt: " << timestamp - last_timestamp_lidar_;
+                return;
             }
 
             lidar_buffer_.push_back(cloud);

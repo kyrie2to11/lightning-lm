@@ -92,6 +92,7 @@ class LaserMapping {
     void ProcessJointStates(double timestamp, double angle);
 
     void ProcessIMU(const lightning::IMUPtr &msg_in);
+    NavState ProcessIMUAndGetState(const lightning::IMUPtr &msg_in);
 
     /// 保存前端的地图
     void SaveMap();
@@ -130,6 +131,7 @@ class LaserMapping {
 
     /// 获取IMU状态
     NavState GetIMUState() const {
+        std::lock_guard<std::mutex> lock(mtx_lio_state_);
         if (p_imu_->IsIMUInited()) {
             return kf_imu_.GetX();
         } else {
@@ -236,6 +238,7 @@ class LaserMapping {
     std::vector<char> point_selected_icp_;  // 点到点的selected points
 
     std::mutex mtx_buffer_;
+    mutable std::mutex mtx_lio_state_;
     std::deque<double> time_buffer_;
 
     std::deque<PointCloudType::Ptr> lidar_buffer_;
