@@ -78,12 +78,15 @@ void PangolinWindow::UpdatePredictPose(const SE3& pose) {
     impl_->predicted_pose_ = pose;
 }
 
-void PangolinWindow::UpdateScan(CloudPtr cloud, const SE3& pose) {
+void PangolinWindow::UpdateScan(CloudPtr cloud, const SE3& pose) { UpdateScan(cloud, pose, pose); }
+
+void PangolinWindow::UpdateScan(CloudPtr cloud, const SE3& pose, const SE3& trajectory_pose) {
     std::lock_guard<std::mutex> lock(impl_->mtx_current_scan_);
     std::lock_guard<std::mutex> lock2(impl_->mtx_nav_state_);
 
     *impl_->current_scan_ = *cloud;  // need deep copy
     impl_->current_scan_pose_ = pose;
+    impl_->current_scan_trajectory_pose_ = trajectory_pose;
     impl_->current_scan_need_update_.store(true);
 }
 

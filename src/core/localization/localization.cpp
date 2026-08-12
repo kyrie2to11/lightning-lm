@@ -258,7 +258,7 @@ void Localization::LidarLocProcCloud(CloudPtr scan_undist) {
 
     if (ui_) {
         // Twi with Til, here pose means Twl, thus Til=I
-        ui_->UpdateScan(scan_undist, res.pose_);
+        ui_->UpdateScan(scan_undist, res.pose_, res.pose_ * T_imu_lidar_);
     }
 
     if (loc_state_callback_) {

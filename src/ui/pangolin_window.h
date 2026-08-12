@@ -47,6 +47,7 @@ class PangolinWindow {
 
     /// 更新一次scan和它对应的Pose
     void UpdateScan(CloudPtr cloud, const SE3& pose);
+    void UpdateScan(CloudPtr cloud, const SE3& pose, const SE3& trajectory_pose);
 
     void UpdateKF(std::shared_ptr<Keyframe> kf);
 

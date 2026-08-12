@@ -156,9 +156,9 @@ bool PangolinWindowImpl::UpdateCurrentScan() {
 
         current_scan_need_update_.store(false);
 
-        traj_scans_->AddPt(current_scan_pose_);
+        traj_scans_->AddPt(current_scan_trajectory_pose_);
 
-        newest_backend_pose_ = current_scan_pose_;
+        newest_backend_pose_ = current_scan_trajectory_pose_;
     }
 
     while (scans_.size() >= max_size_of_current_scan_) {

@@ -77,6 +77,7 @@ class PangolinWindowImpl {
     SE3 predicted_pose_;
     SE3 newest_backend_pose_;  // 最新pose
     SE3 current_scan_pose_;    // 当前scan对应的pose or Twb/Twi
+    SE3 current_scan_trajectory_pose_;  // 当前 scan 对应的对外轨迹参考位姿
     std::deque<std::pair<int, int>> loop_info_;
     std::vector<LoopCandidate> new_loop_candidate_;
 
