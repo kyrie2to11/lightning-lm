@@ -144,6 +144,12 @@ if(BUILD_TESTING)
     target_link_libraries(test_localization_tf
             ${PROJECT_NAME}.libs
             ${third_party_libs})
+
+    ament_add_gtest(test_localization_state_flow
+            ${PROJECT_SOURCE_DIR}/test/test_localization_state_flow.cc)
+    target_link_libraries(test_localization_state_flow
+            ${PROJECT_NAME}.libs
+            ${third_party_libs})
 endif()
 
 add_subdirectory(app)
