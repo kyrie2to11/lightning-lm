@@ -9,9 +9,12 @@
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_listener.h>
 #include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
+#include <nav_msgs/msg/path.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/imu.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
+
+#include <cstddef>
 
 #include "livox_ros_driver2/msg/custom_msg.hpp"
 
@@ -51,6 +54,10 @@ class LocSystem {
     void Spin();
 
    private:
+    static constexpr std::size_t kMaxPgoPathPoses = 2000;
+    static constexpr std::size_t kPgoPathTrimPoses = 500;
+    static constexpr double kMaxOdomTfAgeSec = 0.05;
+
     Options options_;
 
     std::shared_ptr<loc::Localization> loc_ = nullptr;  // 定位接口
@@ -72,6 +79,10 @@ class LocSystem {
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_sub_ = nullptr;
     rclcpp::Subscription<livox_ros_driver2::msg::CustomMsg>::SharedPtr livox_sub_ = nullptr;
     rclcpp::Subscription<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr initial_pose_sub_ = nullptr;
+    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr localization_map_pub_ = nullptr;
+    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr aligned_scan_pub_ = nullptr;
+    rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pgo_path_pub_ = nullptr;
+    nav_msgs::msg::Path pgo_path_;
 };
 
 };  // namespace lightning

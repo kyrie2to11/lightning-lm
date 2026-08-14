@@ -55,6 +55,8 @@ class Localization {
     void SetLidarExtrinsic(const Vec3d& translation, const Mat3d& rotation);
     void SetInitialWorldImuRotation(const Mat3d& rotation);
 
+    CloudPtr GetVisualizationMap() const;
+
     /// 处理lidar消息
     void ProcessLidarMsg(const sensor_msgs::msg::PointCloud2::SharedPtr laser_msg);
     void ProcessLivoxLidarMsg(const livox_ros_driver2::msg::CustomMsg::SharedPtr laser_msg);
@@ -82,8 +84,12 @@ class Localization {
     using LocStateCallback = std::function<void(const std_msgs::msg::Int32& state)>;
     using PointcloudBodyCallback = std::function<void(const sensor_msgs::msg::PointCloud2& pointcloud)>;
     using PointcloudWorldCallback = std::function<void(const sensor_msgs::msg::PointCloud2& pointcloud)>;
+    using AlignedScanCallback = std::function<void(const sensor_msgs::msg::PointCloud2& pointcloud)>;
+    using OptimizedPoseCallback = std::function<void(const SE3& pose, double timestamp)>;
 
     void SetTFCallback(TFCallback&& callback);
+    void SetAlignedScanCallback(AlignedScanCallback&& callback);
+    void SetOptimizedPoseCallback(OptimizedPoseCallback&& callback);
 
     // void SetPathCallback(std::function<void(const nav_msgs::msg::Path& path)>&& callback);
     // void SetPointcloudWorldCallback(std::function<void(const sensor_msgs::msg::PointCloud2& pointcloud)>&& callback);
@@ -125,6 +131,8 @@ class Localization {
     LocStateCallback loc_state_callback_;
     PointcloudBodyCallback pointcloud_body_callback_;
     PointcloudWorldCallback pointcloud_world_callback_;
+    AlignedScanCallback aligned_scan_callback_;
+    OptimizedPoseCallback optimized_pose_callback_;
 
     /// 输入检查
     double last_imu_time_ = 0;

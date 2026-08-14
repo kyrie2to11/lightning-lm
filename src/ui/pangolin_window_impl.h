@@ -29,7 +29,7 @@ class PangolinWindowImpl {
    public:
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 
-    PangolinWindowImpl() = default;
+    explicit PangolinWindowImpl(PangolinWindow::Mode mode) : mode_(mode) {}
     ~PangolinWindowImpl() = default;
 
     PangolinWindowImpl(const PangolinWindowImpl &) = delete;
@@ -80,6 +80,8 @@ class PangolinWindowImpl {
     SE3 newest_backend_pose_;  // 最新pose
     SE3 current_scan_pose_;    // 当前scan对应的pose or Twb/Twi
     SE3 current_scan_trajectory_pose_;  // 当前 scan 对应的对外轨迹参考位姿
+    bool has_backend_pose_ = false;
+    bool has_optimized_pgo_pose_ = false;
     std::deque<std::pair<int, int>> loop_info_;
     std::vector<LoopCandidate> new_loop_candidate_;
 
@@ -137,6 +139,7 @@ class PangolinWindowImpl {
     bool following_loc_ = true;       // 相机是否追踪定位结果
     bool draw_frontend_traj_ = true;  // 可视化前端轨迹
     bool draw_backend_traj_ = true;   // 可视化后端轨迹
+    PangolinWindow::Mode mode_ = PangolinWindow::Mode::MAPPING;
 
     // text
     pangolin::GlText gltext_label_global_;

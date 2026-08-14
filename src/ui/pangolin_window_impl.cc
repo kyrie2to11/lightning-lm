@@ -24,10 +24,22 @@ bool PangolinWindowImpl::Init() {
     // unset the current context from the main thread
     pangolin::GetBoundWindow()->RemoveCurrent();
 
-    // 雷达定位轨迹opengl设置
-    traj_newest_state_.reset(new ui::UiTrajectory(Vec3f(1.0, 0.0, 0.0)));  // 红色
-    traj_scans_.reset(new ui::UiTrajectory(Vec3f(0.0, 1.0, 0.0)));         // 绿色
-    traj_optimized_pgo_.reset(new ui::UiTrajectory(Vec3f(1.0, 1.0, 0.0))); // 黄色
+    if (mode_ == PangolinWindow::Mode::LOCALIZATION) {
+        traj_newest_state_.reset(new ui::UiTrajectory(
+            Vec3f(1.0, 0.0, 0.0), ui::TrajectoryPrimitive::LINE_STRIP, 3.0F));
+        traj_scans_.reset(new ui::UiTrajectory(
+            Vec3f(0.0, 1.0, 0.0), ui::TrajectoryPrimitive::POINTS, 4.0F));
+        traj_optimized_pgo_.reset(new ui::UiTrajectory(
+            Vec3f(1.0, 1.0, 0.0), ui::TrajectoryPrimitive::LINE_STRIP, 3.0F,
+            ui::TrajectoryLineStyle::DASHED));
+    } else {
+        traj_newest_state_.reset(new ui::UiTrajectory(
+            Vec3f(1.0, 0.0, 0.0), ui::TrajectoryPrimitive::LINE_STRIP, 5.0F));
+        traj_scans_.reset(new ui::UiTrajectory(
+            Vec3f(0.0, 1.0, 0.0), ui::TrajectoryPrimitive::LINE_STRIP, 5.0F));
+        traj_optimized_pgo_.reset(new ui::UiTrajectory(
+            Vec3f(1.0, 1.0, 0.0), ui::TrajectoryPrimitive::LINE_STRIP, 5.0F));
+    }
 
     current_scan_.reset(new PointCloudType);  // 重置pcl点云指针
     current_scan_ui_.reset(new ui::UiCloud);  // 重置用于渲染的点云指针
@@ -65,6 +77,7 @@ void PangolinWindowImpl::Reset(const std::vector<Keyframe::Ptr> &keyframes) {
     }
 
     newest_backend_pose_ = keyframes.back()->GetOptPose();
+    has_backend_pose_ = true;
 }
 
 bool PangolinWindowImpl::DeInit() {
@@ -158,8 +171,10 @@ bool PangolinWindowImpl::UpdateCurrentScan() {
         current_scan_need_update_.store(false);
 
         traj_scans_->AddPt(current_scan_trajectory_pose_);
-
-        newest_backend_pose_ = current_scan_trajectory_pose_;
+        if (!has_optimized_pgo_pose_) {
+            newest_backend_pose_ = current_scan_trajectory_pose_;
+            has_backend_pose_ = true;
+        }
     }
 
     while (scans_.size() >= max_size_of_current_scan_) {
@@ -206,6 +221,9 @@ bool PangolinWindowImpl::UpdateOptimizedPgo() {
 
     std::lock_guard<std::mutex> lock(mtx_nav_state_);
     traj_optimized_pgo_->AddPt(optimized_pgo_pose_);
+    newest_backend_pose_ = optimized_pgo_pose_;
+    has_backend_pose_ = true;
+    has_optimized_pgo_pose_ = true;
     optimized_pgo_need_update_.store(false);
     return true;
 }
@@ -228,17 +246,25 @@ void PangolinWindowImpl::DrawAll() {
 
     current_scan_ui_->Render();
 
-    if (draw_frontend_traj_) {
-        traj_newest_state_->Render();
-        // 车
-        frontend_car_.SetPose(newest_frontend_pose_);  // 车在current pose上
-        frontend_car_.Render();
-    }
-
+    GLint previous_depth_func = GL_LESS;
+    glGetIntegerv(GL_DEPTH_FUNC, &previous_depth_func);
+    glDepthFunc(GL_LEQUAL);
     if (draw_backend_traj_) {
-        traj_scans_->Render();
         traj_optimized_pgo_->Render();
     }
+    if (draw_frontend_traj_) {
+        traj_newest_state_->Render();
+        frontend_car_.SetPose(newest_frontend_pose_);
+        frontend_car_.Render();
+    }
+    if (draw_backend_traj_) {
+        traj_scans_->Render();
+        if (has_backend_pose_) {
+            backend_car_.SetPose(newest_backend_pose_);
+            backend_car_.Render();
+        }
+    }
+    glDepthFunc(previous_depth_func);
 
     // pred_car_.SetPose(predicted_pose_);
     // pred_car_.Render();

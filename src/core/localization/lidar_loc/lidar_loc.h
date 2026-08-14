@@ -123,6 +123,8 @@ class LidarLoc {
     /// 设置init pose
     void SetInitialPose(SE3 init_pose);
 
+    CloudPtr GetVisualizationMap() { return map_ ? map_->GetFullStaticMap() : CloudPtr(new PointCloudType); }
+
     /// 获取定位结果
     LocalizationResult GetLocalizationResult() {
         UL lock(result_mutex_);

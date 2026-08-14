@@ -3,6 +3,8 @@
 //
 
 #include "core/system/loc_system.h"
+#include "core/system/localization_tf.h"
+#include "core/lightning_math.hpp"
 #include "core/localization/localization.h"
 #include "io/yaml_io.h"
 #include "wrapper/ros_utils.h"
@@ -11,9 +13,12 @@
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_listener.h>
 #include <tf2_eigen/tf2_eigen.hpp>
+#include <pcl_conversions/pcl_conversions.h>
 
 #include <chrono>
 #include <cmath>
+#include <optional>
+#include <string>
 #include <thread>
 
 namespace lightning {
@@ -98,35 +103,43 @@ bool LocSystem::Init(const std::string &yaml_path) {
             [this](const geometry_msgs::msg::TransformStamped &loc_tf) {
                 // loc_tf is map -> base_footprint from localization
                 // We need to compute map -> odom by subtracting odom -> base_footprint
-                geometry_msgs::msg::TransformStamped map_to_odom;
-                map_to_odom.header.frame_id = "map";
-                map_to_odom.header.stamp = loc_tf.header.stamp;
-                map_to_odom.child_frame_id = "odom";
-
+                std::optional<geometry_msgs::msg::TransformStamped> exact_odom_to_base;
+                std::optional<geometry_msgs::msg::TransformStamped> latest_odom_to_base;
+                std::string exact_lookup_error;
                 try {
-                    auto odom_to_base = tf_buffer_->lookupTransform(
+                    exact_odom_to_base = tf_buffer_->lookupTransform(
                         "odom", "base_footprint", loc_tf.header.stamp,
                         rclcpp::Duration::from_seconds(0.1));
-
-                    // T_map_odom = T_map_base * T_base_odom
-                    // T_map_odom = T_map_base * inv(T_odom_base)
-                    Eigen::Isometry3d T_map_base = tf2::transformToEigen(loc_tf.transform);
-                    Eigen::Isometry3d T_odom_base = tf2::transformToEigen(odom_to_base.transform);
-                    Eigen::Isometry3d T_map_odom = T_map_base * T_odom_base.inverse();
-
-                    map_to_odom.transform = tf2::eigenToTransform(T_map_odom).transform;
                 } catch (const tf2::TransformException &ex) {
-                    // Fallback: if odom not available, publish map -> base_footprint directly
-                    LOG(WARNING) << "TF lookup failed: " << ex.what() << ", publishing map->odom as identity";
-                    map_to_odom.transform.translation.x = 0;
-                    map_to_odom.transform.translation.y = 0;
-                    map_to_odom.transform.translation.z = 0;
-                    map_to_odom.transform.rotation.w = 1;
-                    map_to_odom.transform.rotation.x = 0;
-                    map_to_odom.transform.rotation.y = 0;
-                    map_to_odom.transform.rotation.z = 0;
+                    exact_lookup_error = ex.what();
+                    try {
+                        latest_odom_to_base = tf_buffer_->lookupTransform(
+                            "odom", "base_footprint", tf2::TimePointZero,
+                            tf2::durationFromSec(0.0));
+                    } catch (const tf2::TransformException &latest_ex) {
+                        LOG_EVERY_N(WARNING, 100)
+                            << "TF lookup failed: " << exact_lookup_error
+                            << "; latest lookup also failed: "
+                            << latest_ex.what() << "; keeping last valid map->odom";
+                        return;
+                    }
                 }
-                tf_broadcaster_->sendTransform(map_to_odom);
+
+                const auto result = SelectMapToOdomTransform(
+                    loc_tf, exact_odom_to_base, latest_odom_to_base, kMaxOdomTfAgeSec);
+                if (result.status == MapToOdomStatus::STALE) {
+                    LOG_EVERY_N(WARNING, 100)
+                        << "TF lookup failed: " << exact_lookup_error
+                        << "; latest odom TF is stale by " << result.odom_tf_age_sec
+                        << " s; keeping last valid map->odom";
+                    return;
+                }
+                if (result.status == MapToOdomStatus::MISSING) return;
+                if (result.status == MapToOdomStatus::LATEST) {
+                    LOG_EVERY_N(INFO, 100)
+                        << "Using latest odom TF fallback, age " << result.odom_tf_age_sec << " s";
+                }
+                tf_broadcaster_->sendTransform(result.transform);
             });
     }
 
@@ -194,6 +207,50 @@ bool LocSystem::Init(const std::string &yaml_path) {
             }
         } catch (const tf2::TransformException& ex) {
             LOG(ERROR) << "Failed to configure localization LIO from TF: " << ex.what();
+            ret = false;
+        }
+    }
+    if (ret) {
+        localization_map_pub_ = node_->create_publisher<sensor_msgs::msg::PointCloud2>(
+            "/lightning/localization/map", rclcpp::QoS(1).reliable().transient_local());
+        aligned_scan_pub_ = node_->create_publisher<sensor_msgs::msg::PointCloud2>(
+            "/lightning/localization/aligned_scan", rclcpp::QoS(1).reliable());
+        pgo_path_pub_ = node_->create_publisher<nav_msgs::msg::Path>(
+            "/lightning/localization/pgo_path", rclcpp::QoS(1).reliable());
+        loc_->SetAlignedScanCallback([this](const sensor_msgs::msg::PointCloud2& message) {
+            aligned_scan_pub_->publish(message);
+        });
+        loc_->SetOptimizedPoseCallback([this](const SE3& pose, double timestamp) {
+            geometry_msgs::msg::PoseStamped pose_message;
+            pose_message.header.frame_id = "map";
+            pose_message.header.stamp = math::FromSec(timestamp);
+            pose_message.pose.position.x = pose.translation().x();
+            pose_message.pose.position.y = pose.translation().y();
+            pose_message.pose.position.z = pose.translation().z();
+            pose_message.pose.orientation.x = pose.unit_quaternion().x();
+            pose_message.pose.orientation.y = pose.unit_quaternion().y();
+            pose_message.pose.orientation.z = pose.unit_quaternion().z();
+            pose_message.pose.orientation.w = pose.unit_quaternion().w();
+
+            pgo_path_.header = pose_message.header;
+            if (pgo_path_.poses.size() >= kMaxPgoPathPoses) {
+                pgo_path_.poses.erase(
+                    pgo_path_.poses.begin(), pgo_path_.poses.begin() + kPgoPathTrimPoses);
+            }
+            pgo_path_.poses.push_back(pose_message);
+            pgo_path_pub_->publish(pgo_path_);
+        });
+        const CloudPtr visualization_map = loc_->GetVisualizationMap();
+        if (visualization_map != nullptr && !visualization_map->empty()) {
+            sensor_msgs::msg::PointCloud2 map_message;
+            pcl::toROSMsg(*visualization_map, map_message);
+            map_message.header.frame_id = "map";
+            map_message.header.stamp = node_->now();
+            localization_map_pub_->publish(map_message);
+            LOG(INFO) << "Published localization map for manual initial pose: "
+                      << visualization_map->size() << " points";
+        } else {
+            LOG(ERROR) << "Localization map is empty; manual initial pose visualization is unavailable";
             ret = false;
         }
     }

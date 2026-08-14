@@ -2,7 +2,7 @@
 
 namespace lightning::ui {
 
-PangolinWindow::PangolinWindow() { impl_ = std::make_shared<PangolinWindowImpl>(); }
+PangolinWindow::PangolinWindow(Mode mode) { impl_ = std::make_shared<PangolinWindowImpl>(mode); }
 PangolinWindow::~PangolinWindow() { Quit(); }
 
 bool PangolinWindow::Init() {

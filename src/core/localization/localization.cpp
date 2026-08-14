@@ -3,6 +3,7 @@
 
 #include "core/localization/lidar_loc/lidar_loc.h"
 #include "core/localization/localization.h"
+#include "core/localization/localization_visualization.h"
 
 #include <opencv2/highgui.hpp>
 
@@ -46,7 +47,7 @@ bool Localization::Init(const std::string& yaml_path, const std::string& global_
     lidar_loc_ = std::make_shared<LidarLoc>(lidar_loc_options);
 
     if (options_.with_ui_) {
-        ui_ = std::make_shared<ui::PangolinWindow>();
+        ui_ = std::make_shared<ui::PangolinWindow>(ui::PangolinWindow::Mode::LOCALIZATION);
         ui_->SetCurrentScanSize(1);
         ui_->Init();
 
@@ -103,10 +104,10 @@ bool Localization::Init(const std::string& yaml_path, const std::string& global_
         lidar_loc_proc_cloud_.Start();
     }
 
-    // Pangolin 中的红色轨迹表示真正的 PGO 优化结果。高频外推结果仍用于
-    // 对外发布，但不参与该轨迹，避免把 DR/IMU 外推抖动误认为 PGO 抖动。
+    // 低频 PGO 优化结果用于黄色虚线和后端虚线轴；高频外推结果用于
+    // 红色实线和对外发布的最终定位位姿。
     pgo_->SetGlobalOutputHandleFunction([this](const LocalizationResult& res) {
-        if (!ui_ || !res.valid_) {
+        if (!res.valid_) {
             return;
         }
 
@@ -115,7 +116,12 @@ bool Localization::Init(const std::string& yaml_path, const std::string& global_
                   << "], t=" << res.timestamp_;
         optimized_result.pose_ = res.pose_ * T_imu_lidar_;
         optimized_result.vel_b_ = T_imu_lidar_.so3().inverse() * res.vel_b_;
-        ui_->UpdateOptimizedPose(optimized_result.pose_);
+        if (optimized_pose_callback_) {
+            optimized_pose_callback_(optimized_result.pose_, optimized_result.timestamp_);
+        }
+        if (ui_) {
+            ui_->UpdateOptimizedPose(optimized_result.pose_);
+        }
     });
 
     /// 对外发布高频定位结果
@@ -191,6 +197,10 @@ void Localization::SetInitialWorldImuRotation(const Mat3d& rotation) {
     if (lio_) {
         lio_->SetInitialWorldImuRotation(rotation);
     }
+}
+
+CloudPtr Localization::GetVisualizationMap() const {
+    return lidar_loc_ ? lidar_loc_->GetVisualizationMap() : CloudPtr(new PointCloudType);
 }
 
 void Localization::ProcessLidarMsg(const sensor_msgs::msg::PointCloud2::SharedPtr cloud) {
@@ -292,6 +302,10 @@ void Localization::LidarLocProcCloud(CloudPtr scan_undist) {
 
     auto res = lidar_loc_->GetLocalizationResult();
     pgo_->ProcessLidarLoc(res);
+
+    if (aligned_scan_callback_ && res.lidar_loc_valid_) {
+        aligned_scan_callback_(MakeAlignedScanMessage(*scan_undist, res.pose_, res.timestamp_));
+    }
 
     if (ui_) {
         // Twi with Til, here pose means Twl, thus Til=I
@@ -404,5 +418,13 @@ void Localization::SetExternalPose(const Eigen::Quaterniond& q, const Eigen::Vec
 }
 
 void Localization::SetTFCallback(Localization::TFCallback&& callback) { tf_callback_ = callback; }
+
+void Localization::SetAlignedScanCallback(AlignedScanCallback&& callback) {
+    aligned_scan_callback_ = std::move(callback);
+}
+
+void Localization::SetOptimizedPoseCallback(OptimizedPoseCallback&& callback) {
+    optimized_pose_callback_ = std::move(callback);
+}
 
 }  // namespace lightning::loc

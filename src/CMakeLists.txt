@@ -22,6 +22,7 @@ add_library(${PROJECT_NAME}.libs SHARED
         core/maps/tiled_map_chunk.cc
 
         core/localization/localization_result.cc
+        core/localization/localization_visualization.cc
         core/localization/lidar_loc/lidar_loc.cc
         core/localization/lidar_loc/pclomp/ndt_omp.cpp
         core/localization/lidar_loc/pclomp/voxel_grid_covariance_omp.cpp
@@ -41,6 +42,7 @@ add_library(${PROJECT_NAME}.libs SHARED
         ui/ui_trajectory.cc
 
         core/system/slam.cc
+        core/system/localization_tf.cc
         core/system/loc_system.cc
 
         wrapper/bag_io.cc
@@ -120,6 +122,26 @@ if(BUILD_TESTING)
     ament_add_gtest(test_debug_visualization
             ${PROJECT_SOURCE_DIR}/test/test_debug_visualization.cc)
     target_link_libraries(test_debug_visualization
+            ${PROJECT_NAME}.libs
+            ${third_party_libs})
+
+    ament_add_gtest(test_tiled_map_visualization
+            ${PROJECT_SOURCE_DIR}/test/test_tiled_map_visualization.cc)
+    target_link_libraries(test_tiled_map_visualization
+            ${PROJECT_NAME}.libs
+            ${third_party_libs}
+            ${PCL_LIBRARIES})
+
+    ament_add_gtest(test_localization_visualization
+            ${PROJECT_SOURCE_DIR}/test/test_localization_visualization.cc)
+    target_link_libraries(test_localization_visualization
+            ${PROJECT_NAME}.libs
+            ${third_party_libs}
+            ${PCL_LIBRARIES})
+
+    ament_add_gtest(test_localization_tf
+            ${PROJECT_SOURCE_DIR}/test/test_localization_tf.cc)
+    target_link_libraries(test_localization_tf
             ${PROJECT_NAME}.libs
             ${third_party_libs})
 endif()

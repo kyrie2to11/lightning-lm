@@ -386,6 +386,20 @@ CloudPtr TiledMap::GetAllMap() {
     return cloud;
 }
 
+CloudPtr TiledMap::GetFullStaticMap() {
+    CloudPtr cloud(new PointCloudType);
+
+    UL lock(static_data_mutex_);
+    for (const auto& [grid, chunk] : static_chunks_) {
+        (void)grid;
+        if (chunk->cloud_ != nullptr) {
+            *cloud += *chunk->cloud_;
+        }
+    }
+
+    return cloud;
+}
+
 std::map<int, CloudPtr> TiledMap::GetStaticCloud() {
     std::map<int, CloudPtr> cloud;
 

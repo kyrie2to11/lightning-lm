@@ -21,7 +21,9 @@ class PangolinWindow {
    public:
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 
-    PangolinWindow();
+    enum class Mode { MAPPING, LOCALIZATION };
+
+    explicit PangolinWindow(Mode mode = Mode::MAPPING);
     ~PangolinWindow();
 
     /// @brief 初始化窗口，后台启动render线程。

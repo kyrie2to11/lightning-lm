@@ -101,7 +101,7 @@ bool SlamSystem::Init(const std::string& yaml_path) {
 
     if (options_.with_visualization_) {
         LOG(INFO) << "slam with 3D UI";
-        ui_ = std::make_shared<ui::PangolinWindow>();
+        ui_ = std::make_shared<ui::PangolinWindow>(ui::PangolinWindow::Mode::MAPPING);
         ui_->Init();
 
         lio_->SetUI(ui_);

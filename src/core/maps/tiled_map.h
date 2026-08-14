@@ -154,6 +154,9 @@ class TiledMap {
     /// 获取拼接好的地图
     CloudPtr GetAllMap();
 
+    /// 获取所有静态分块，用于定位启动前的全局地图可视化
+    CloudPtr GetFullStaticMap();
+
     /**
      * 使用最近配准之后的scan更新动态图层
      * @param cloud_world       世界坐标系下点云
