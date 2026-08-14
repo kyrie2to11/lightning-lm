@@ -251,9 +251,10 @@ void Localization::LidarOdomProcCloud(CloudPtr cloud) {
     }
 
     auto lo_state = lio_->GetState();
+    auto replayed_imu_state = lio_->GetIMUState();
 
     lidar_loc_->ProcessLO(lo_state);
-    pgo_->ProcessLidarOdom(lo_state);
+    pgo_->ProcessLidarOdom(lo_state, replayed_imu_state);
 
     // LOG(INFO) << "LO pose: " << std::setprecision(12) << lo_state.timestamp_ << " "
     //           << lo_state.GetPose().translation().transpose();

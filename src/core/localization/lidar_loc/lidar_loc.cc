@@ -11,6 +11,7 @@
 #include "pclomp/voxel_grid_covariance_omp_impl.hpp"
 
 #include "core/localization/lidar_loc/lidar_loc.h"
+#include "core/localization/localization_state_flow.h"
 
 #include <opencv2/highgui.hpp>
 
@@ -486,6 +487,11 @@ void LidarLoc::Align(const CloudPtr& input) {
             if (InitWithFP(input, initial_pose_)) {
                 LOG(INFO) << "init with external pose: " << initial_pose_.translation().transpose();
                 initial_pose_set_ = false;
+                return;
+            }
+            if (!ShouldTryAutomaticInitialization(initial_pose_set_)) {
+                LOG_EVERY_N(INFO, 20)
+                    << "external initial pose is still pending; skip automatic initialization";
                 return;
             }
         }

@@ -27,6 +27,18 @@ void PGO::SetHighFrequencyGlobalOutputHandleFunction(PGO::GlobalOutputHandleFunc
 
 void PGO::SetOutputExtrinsic(const SE3& T_imu_output) { T_imu_output_ = T_imu_output; }
 
+bool PGO::PublishHighFrequencyResult(const LocalizationResult& result) {
+    if (!high_freq_output_func_) return false;
+    if (!high_freq_output_timestamp_gate_.Accept(result.timestamp_)) {
+        LOG_EVERY_N(WARNING, 100)
+            << "skip non-increasing high-frequency localization timestamp: "
+            << result.timestamp_;
+        return false;
+    }
+    high_freq_output_func_(result);
+    return true;
+}
+
 void PGO::PubResult() {
     // 在有需要时，高频外推然后向外发送数据
     if (high_freq_output_func_ && impl_->result_.valid_) {
@@ -116,7 +128,7 @@ void PGO::PubResult() {
         // RPYXYZ.z = 0;
         // result.pose_ = common::math::XYZRPYToSE3(RPYXYZ);
 
-        high_freq_output_func_(result);
+        if (!PublishHighFrequencyResult(result)) return;
 
         impl_->output_pose_queue_.emplace_back(result.timestamp_, result.pose_);
         while (impl_->output_pose_queue_.size() > 1000) {
@@ -142,7 +154,8 @@ void PGO::PubResult() {
 
 bool PGO::ProcessDR(const NavState& dr_result) {
     UL lock(impl_->data_mutex_);
-    if (!dr_result.pose_is_ok_ || dr_result.timestamp_ <= 0.0) {
+    if (!std::isfinite(dr_result.timestamp_) ||
+        !dr_result.pose_is_ok_ || dr_result.timestamp_ <= 0.0) {
         LOG(WARNING) << "ignore invalid DR state: valid=" << dr_result.pose_is_ok_
                      << ", timestamp=" << dr_result.timestamp_;
         return false;
@@ -153,6 +166,18 @@ bool PGO::ProcessDR(const NavState& dr_result) {
         if (dr_result.timestamp_ <= last_stamp) {
             LOG(WARNING) << "当前DR定位的结果的时间戳应当比上一个时间戳数值大，实际相减得"
                          << dr_result.timestamp_ - last_stamp;
+            return false;
+        }
+    }
+
+    // LiDAR correction may have rebuilt this branch while an IMU callback was
+    // waiting to enter PGO. Never let that late, pre-correction state replace
+    // the corrected state at the same (or a newer) timestamp.
+    if (!high_freq_dr_pose_queue_.empty()) {
+        const double rebase_timestamp = high_freq_dr_pose_queue_.back().timestamp_;
+        if (!IsStrictlyNewerTimestamp(dr_result.timestamp_, rebase_timestamp)) {
+            LOG(WARNING) << "ignore DR state older than high-frequency rebase, dt="
+                         << dr_result.timestamp_ - rebase_timestamp;
             return false;
         }
     }
@@ -198,13 +223,18 @@ bool PGO::ProcessDR(const NavState& dr_result) {
         PubResult();
     } else if (is_parking_ && high_freq_output_func_) {
         parking_result_.timestamp_ = dr_result.timestamp_;
-        high_freq_output_func_(parking_result_);
+        PublishHighFrequencyResult(parking_result_);
     }
 
     return true;
 }
 
 bool PGO::ProcessLidarOdom(const NavState& lio_result) {
+    return ProcessLidarOdom(lio_result, lio_result);
+}
+
+bool PGO::ProcessLidarOdom(
+    const NavState& lio_result, const NavState& replayed_imu_result) {
     UL lock(impl_->data_mutex_);
     /// 假定LidarOdom定位是按时间顺序到达的
     if (!impl_->lidar_odom_pose_queue_.empty()) {
@@ -231,8 +261,10 @@ bool PGO::ProcessLidarOdom(const NavState& lio_result) {
     // Run() 已经用这一帧 LiDAR 校正并回放了缓存 IMU。清除旧的高频分支，
     // 后续 DR 只计算从该校正位姿开始的增量。
     high_freq_dr_pose_queue_.clear();
-    if (lio_result.pose_is_ok_ && lio_result.timestamp_ > 0.0) {
-        high_freq_dr_pose_queue_.emplace_back(lio_result);
+    const NavState rebase_state =
+        SelectHighFrequencyRebaseState(lio_result, replayed_imu_result);
+    if (rebase_state.pose_is_ok_ && rebase_state.timestamp_ > 0.0) {
+        high_freq_dr_pose_queue_.emplace_back(rebase_state);
         smoother_->ClearDRMotion();
     }
 
@@ -253,7 +285,7 @@ bool PGO::ProcessLidarOdom(const NavState& lio_result) {
         PubResult();
     } else if (is_parking_ && high_freq_output_func_) {
         parking_result_.timestamp_ = lio_result.timestamp_;
-        high_freq_output_func_(parking_result_);
+        PublishHighFrequencyResult(parking_result_);
     }
 
     return true;
@@ -264,7 +296,7 @@ bool PGO::ProcessLidarLoc(const LocalizationResult& loc_result) {
     is_parking_ = loc_result.is_parking_;
     if (is_parking_ && high_freq_output_func_) {
         parking_result_ = loc_result;
-        high_freq_output_func_(loc_result);
+        PublishHighFrequencyResult(loc_result);
         return true;
     }
 
@@ -353,6 +385,7 @@ std::shared_ptr<PGOFrame> PGO::GetCurrentPGOFrame() const { return impl_->curren
 bool PGO::Reset() {
     UL lock(impl_->data_mutex_);
     high_freq_dr_pose_queue_.clear();
+    high_freq_output_timestamp_gate_.Reset();
     smoother_->Reset();
     return impl_->Reset();
 }

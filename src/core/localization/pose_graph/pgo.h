@@ -3,6 +3,7 @@
 #include "common/eigen_types.h"
 #include "common/nav_state.h"
 #include "core/localization/localization_result.h"
+#include "core/localization/localization_state_flow.h"
 
 #include "pgo_impl.h"
 #include "pose_extrapolator.h"
@@ -44,6 +45,7 @@ class PGO {
 
     /// 处理lidarOdom信息
     bool ProcessLidarOdom(const NavState& lio_result);
+    bool ProcessLidarOdom(const NavState& lio_result, const NavState& replayed_imu_result);
 
     /// 接收激光定位信息（触发PGO优化）
     bool ProcessLidarLoc(const LocalizationResult& loc_result);
@@ -85,6 +87,7 @@ class PGO {
      * @return
      */
     bool ExtrapolateLocResult(LocalizationResult& output_result);
+    bool PublishHighFrequencyResult(const LocalizationResult& result);
 
     std::unique_ptr<PGOImpl> impl_;
 
@@ -100,6 +103,7 @@ class PGO {
     // LiDAR 校正会重建并回放 IMU 状态。高频外推必须从最新的 LiDAR
     // 校正分支重新开始，不能把校正前后的 IMU 状态差当成车辆运动。
     std::deque<NavState> high_freq_dr_pose_queue_;
+    MonotonicTimestampGate high_freq_output_timestamp_gate_;
 
     float imu_interruption_time_thd_ = 1.0;  // imu数据断流时间阈值 s
     float lidar_loc_score_thd_ = 0.5;        // 激光定位分值阈值
