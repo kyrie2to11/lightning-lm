@@ -91,7 +91,7 @@ LIGHTNING_CAPTURE_ESKF_ITERATION_STRIDE=1 \
 LIGHTNING_CAPTURE_IMU_SAMPLE_STRIDE=10 \
 LIGHTNING_CAPTURE_DIR=/tmp/lightning_capture \
 LIGHTNING_LOOP_CLOSING_ENABLED=true \
-bash hw_tests/bag_tools/bag_replay_polka_lightning_mapping.sh \
+bash hw_tests/bag_tools/bag_replay_polka_lightning_map.sh \
   /home/jarvis/projects/iRail-Truck/bags/slam_debug_20260730_215238_noned \
   base_footprint before
 ```
