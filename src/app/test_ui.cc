@@ -4,6 +4,8 @@
 
 #include "ui/pangolin_window.h"
 
+#include <gflags/gflags.h>
+#include <glog/logging.h>
 #include <pangolin/display/display.h>
 #include <pangolin/display/view.h>
 #include <pangolin/gl/gldraw.h>
