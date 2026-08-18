@@ -57,6 +57,12 @@ class LocSystem {
     static constexpr std::size_t kMaxPgoPathPoses = 2000;
     static constexpr std::size_t kPgoPathTrimPoses = 500;
     static constexpr double kMaxOdomTfAgeSec = 0.05;
+    static constexpr std::size_t kMaxTrajectoryPoses = 500;        // 10Hz × 50s 滚动窗口
+    static constexpr std::size_t kTrajectoryTrimPoses = 100;
+    static constexpr double kTrajectorySamplePeriodSec = 0.1;      // 高频输出按 10Hz 降采样
+
+    /// 高频定位结果降采样追加到轨迹话题（与 pgo_path 的低频 PGO 轨迹互补）
+    void AppendTrajectorySample(const geometry_msgs::msg::TransformStamped& loc_tf);
 
     Options options_;
 
@@ -83,6 +89,9 @@ class LocSystem {
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr aligned_scan_pub_ = nullptr;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pgo_path_pub_ = nullptr;
     nav_msgs::msg::Path pgo_path_;
+    rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr trajectory_pub_ = nullptr;
+    nav_msgs::msg::Path trajectory_;
+    double trajectory_last_sample_sec_ = 0.0;  // 上次轨迹采样时间，用于降采样
 };
 
 };  // namespace lightning

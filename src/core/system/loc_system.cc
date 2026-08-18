@@ -140,6 +140,7 @@ bool LocSystem::Init(const std::string &yaml_path) {
                         << "Using latest odom TF fallback, age " << result.odom_tf_age_sec << " s";
                 }
                 tf_broadcaster_->sendTransform(result.transform);
+                AppendTrajectorySample(loc_tf);
             });
     }
 
@@ -217,6 +218,8 @@ bool LocSystem::Init(const std::string &yaml_path) {
             "/lightning/localization/aligned_scan", rclcpp::QoS(1).reliable());
         pgo_path_pub_ = node_->create_publisher<nav_msgs::msg::Path>(
             "/lightning/localization/pgo_path", rclcpp::QoS(1).reliable());
+        trajectory_pub_ = node_->create_publisher<nav_msgs::msg::Path>(
+            "/lightning/localization/trajectory", rclcpp::QoS(1).reliable());
         loc_->SetAlignedScanCallback([this](const sensor_msgs::msg::PointCloud2& message) {
             aligned_scan_pub_->publish(message);
         });
@@ -267,6 +270,30 @@ void LocSystem::SetInitPose(const SE3 &pose) {
 
     loc_->SetExternalPose(pose.unit_quaternion(), pose.translation());
     loc_started_ = true;
+}
+
+void LocSystem::AppendTrajectorySample(const geometry_msgs::msg::TransformStamped &loc_tf) {
+    const double stamp_sec = rclcpp::Time(loc_tf.header.stamp).seconds();
+    if (stamp_sec - trajectory_last_sample_sec_ < kTrajectorySamplePeriodSec) {
+        return;  // 高频输出按 10Hz 降采样，画线已够丝滑
+    }
+    trajectory_last_sample_sec_ = stamp_sec;
+
+    geometry_msgs::msg::PoseStamped pose_message;
+    pose_message.header.frame_id = "map";
+    pose_message.header.stamp = loc_tf.header.stamp;
+    pose_message.pose.position.x = loc_tf.transform.translation.x;
+    pose_message.pose.position.y = loc_tf.transform.translation.y;
+    pose_message.pose.position.z = loc_tf.transform.translation.z;
+    pose_message.pose.orientation = loc_tf.transform.rotation;
+
+    trajectory_.header = pose_message.header;
+    if (trajectory_.poses.size() >= kMaxTrajectoryPoses) {
+        trajectory_.poses.erase(
+            trajectory_.poses.begin(), trajectory_.poses.begin() + kTrajectoryTrimPoses);
+    }
+    trajectory_.poses.push_back(pose_message);
+    trajectory_pub_->publish(trajectory_);
 }
 
 void LocSystem::ProcessIMU(const IMUPtr &imu) {
