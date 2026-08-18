@@ -22,6 +22,10 @@ endif ()
 
 # Printf version info
 # include(cmake/version.cmake)
+# 上游 version.cmake 被注释导致 LIVOX_ROS_DRIVER2_VERSION 为空，第二次 project()
+# 会把 livox_ros_driver2_VERSION 覆盖为空串，ament_cmake_python 生成的 setup.py
+# 因此拿到 version=''，在 setuptools>=68 严格 PEP440 归一化下直接构建失败。
+set(LIVOX_ROS_DRIVER2_VERSION "1.0.0")
 project(${PROJECT_NAME} VERSION ${LIVOX_ROS_DRIVER2_VERSION} LANGUAGES CXX)
 message(STATUS "${PROJECT_NAME} version: ${LIVOX_ROS_DRIVER2_VERSION}")
 
