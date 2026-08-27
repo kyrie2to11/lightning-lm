@@ -90,8 +90,16 @@ loop_closing:
   loop_kf_gap: 20
   min_id_interval: 20
   closest_id_th: 50
-  max_range: 8.0
+  # 检测半径=闭环视野上限：候选生成要求当前帧与历史帧平面距离≤max_range，
+  # 前端漂移一旦超过它就永远没有候选（静默失效）。场景变大需同步放大，
+  # 安全性由下方关联门控兜底（错配候选会被物理重合度拒绝）。
+  max_range: 3.5
   ndt_score_th: 1.0
+  # 关联门控（两带语义；缺省配置不介入，上游默认行为不变）：
+  #   lock(<loop_assoc_lock_dist)：平移高度重合 → 偏航扫描卫兵通过后直接采信，跳过 NDT
+  #   其余([lock_dist,∞))：一律拒绝——退化场景下 NDT 中间带"纠偏"会焊死相邻段（fix2 教训）
+  loop_assoc_max_dist: 1.0   # 仅用于拒绝日志 mid/far 分类；留作富结构场景重启中间带策略的接口
+  loop_assoc_lock_dist: 0.30
   with_height: true # 平面场景，约束高度防 Z 轴漂移
 
 lidar_loc:

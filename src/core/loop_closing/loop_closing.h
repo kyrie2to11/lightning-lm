@@ -43,6 +43,12 @@ class LoopClosing {
 
         double rk_loop_th_ = 5.2 / 5;  // 回环的RK阈值
 
+        /// 关联质量门控：防跨段错配与 NDT 游走（bag 回放验证 2026-08-27）。
+        /// 默认不介入（lock=0 空带、max=inf 不拒），由车辆 yaml 显式启用，
+        /// 避免静默改变未适配配置（上游数据集/loc 配置）的行为。
+        double loop_assoc_max_dist_ = 1e9;   // 预重叠超过此值按"远距错配"拒绝
+        double loop_assoc_lock_dist_ = 0.0;  // 预重叠优于此值直接采信当前位姿相对量(跳过NDT)
+
         bool with_height_ = true;
         double height_noise_ = 0.1;
     };

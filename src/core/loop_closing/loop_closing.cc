@@ -9,8 +9,10 @@
 #include "utils/pointcloud_utils.h"
 
 #include <pcl/common/transforms.h>
+#include <pcl/kdtree/kdtree_flann.h>
 #include <pcl/registration/ndt.h>
 #include <iomanip>
+#include <limits>
 #include <sstream>
 
 #include "core/opti_algo/algo_select.h"
@@ -109,6 +111,14 @@ void LoopClosing::Init(const std::string yaml_path) {
         }
         if (root["fasterlio"]["world_frame_id"]) {
             world_frame_id_ = root["fasterlio"]["world_frame_id"].as<std::string>();
+        }
+        if (root["loop_closing"]["loop_assoc_max_dist"]) {
+            options_.loop_assoc_max_dist_ =
+                root["loop_closing"]["loop_assoc_max_dist"].as<double>();
+        }
+        if (root["loop_closing"]["loop_assoc_lock_dist"]) {
+            options_.loop_assoc_lock_dist_ =
+                root["loop_closing"]["loop_assoc_lock_dist"].as<double>();
         }
     }
 
@@ -258,7 +268,7 @@ void LoopClosing::ComputeLoopCandidates() {
     std::vector<LoopCandidate> succ_candidates;
     for (const auto& lc : candidates_) {
         // LOG(INFO) << "candi " << lc.idx1_ << ", " << lc.idx2_ << " s: " << lc.ndt_score_;
-        if (lc.ndt_score_ > options_.ndt_score_th_) {
+        if (lc.assoc_lock_trusted_ || lc.ndt_score_ > options_.ndt_score_th_) {
             succ_candidates.emplace_back(lc);
         }
     }
@@ -329,21 +339,124 @@ void LoopClosing::ComputeForCandidate(lightning::LoopCandidate& c) {
     }
 
     Mat4f Tw2 = kf2->GetOptPose().matrix().cast<float>();
+
+    // 源扫描按当前位姿摆放——关联门控、debug 可视化与 capture 落盘共用这一份。
+    CloudPtr src_init_world(new PointCloudType);
+    pcl::transformPointCloud(*submap_kf2, *src_init_world, Tw2);
+
+    // ---- 关联质量门控（默认不介入，由 yaml loop_assoc_* 显式启用） ----
+    // 语义：lock 带(<lock_dist)直接采信当前位姿相对量；其余一律拒绝。
+    const bool assoc_gate_enabled =
+        options_.loop_assoc_lock_dist_ > 0.0 || options_.loop_assoc_max_dist_ < 1e8;
+    if (assoc_gate_enabled) {
+        // 参考树只建一次（pre 门/后验门共用）；参考点数钳制防大场景候选变慢。
+        const CloudPtr assoc_target_ref = VoxelGrid(submap_kf1, 0.25);
+        CloudPtr assoc_ref_thin = assoc_target_ref;
+        if (assoc_ref_thin->size() > 50000) {
+            assoc_ref_thin.reset(new PointCloudType);
+            const std::size_t stride = assoc_target_ref->size() / 50000 + 1;
+            for (std::size_t i = 0; i < assoc_target_ref->size(); i += stride) {
+                assoc_ref_thin->push_back(assoc_target_ref->points[i]);
+            }
+        }
+        pcl::KdTreeFLANN<PointType> assoc_tree;
+        assoc_tree.setInputCloud(assoc_ref_thin);
+
+        auto overlap_median = [&assoc_tree, &assoc_ref_thin](const CloudPtr& query_world) {
+            if (!query_world || query_world->empty() || assoc_ref_thin->empty()) {
+                return std::numeric_limits<double>::max();
+            }
+            std::vector<int> knn_idx(1);
+            std::vector<float> knn_sq(1);
+            const CloudPtr qv = VoxelGrid(query_world, 0.25);
+            std::vector<double> dists;
+            dists.reserve(qv->size());
+            for (const auto& p : qv->points) {
+                if (assoc_tree.nearestKSearch(p, 1, knn_idx, knn_sq) > 0) {
+                    dists.push_back(std::sqrt(knn_sq[0]));
+                }
+            }
+            if (dists.empty()) {
+                return std::numeric_limits<double>::max();
+            }
+            std::nth_element(dists.begin(), dists.begin() + dists.size() / 2, dists.end());
+            return dists[dists.size() / 2];
+        };
+        const double pre_overlap = overlap_median(src_init_world);
+
+        if (pre_overlap < options_.loop_assoc_lock_dist_) {
+            /// 强一致带：平移已高度重合 → 跳过 NDT 直接采信。但平行走廊类结构对
+            /// chamfer 的偏航不敏感（墙平行时旋转不改变最近邻距离），先做 ±6°
+            /// 偏航扫描：若小角度旋转能显著改善重叠，说明信念偏航可疑，拒绝焊接。
+            auto chamfer_at_yaw = [&](double yaw_deg) {
+                const double rad = yaw_deg * M_PI / 180.0;
+                Eigen::AngleAxisf yaw(static_cast<float>(rad),
+                                      Eigen::Vector3f::UnitZ());
+                Mat4f T = Tw2;
+                T.block<3, 3>(0, 0) = T.block<3, 3>(0, 0) * yaw.matrix();
+                CloudPtr rotated(new PointCloudType);
+                pcl::transformPointCloud(*submap_kf2, *rotated, T);
+                return overlap_median(rotated);
+            };
+            double best_yaw_ratio = 1.0;
+            for (const double d : {-6.0, -3.0, 3.0, 6.0}) {
+                best_yaw_ratio =
+                    std::min(best_yaw_ratio,
+                             chamfer_at_yaw(d) / std::max(pre_overlap, 1e-3));
+            }
+            if (best_yaw_ratio < 0.8) {
+                LOG(INFO) << "lc reject(yaw-suspect) " << c.idx1_ << "->" << c.idx2_
+                          << ", pre_overlap " << pre_overlap
+                          << ", yaw-sweep ratio " << best_yaw_ratio;
+                c.ndt_score_ = 0.0;
+                return;
+            }
+            c.Tij_ = kf1->GetOptPose().inverse() * kf2->GetOptPose();
+            c.assoc_lock_trusted_ = true;
+            LOG(INFO) << "lc assoc-lock " << c.idx1_ << "->" << c.idx2_
+                      << ", pre_overlap " << pre_overlap << " m";
+            if (capture_event) {
+                std::ostringstream row;
+                row << "1,assoc_lock,0," << options_.ndt_score_th_
+                    << "," << c.Tij_.translation().x() << ","
+                    << c.Tij_.translation().y() << "," << c.Tij_.translation().z()
+                    << ",0,0,0,1";
+                data_capture_->appendBackendRow(
+                    event, "result.csv",
+                    "accepted,reason,score,threshold,constraint_tx,constraint_ty,"
+                    "constraint_tz,constraint_qw,constraint_qx,constraint_qy,"
+                    "constraint_qz",
+                    row.str());
+            }
+            return;
+        }
+        /// lock 带之外一律拒绝（含 0.3~max 的"中间带"与 >max 的"远距错配"）：
+        /// fix2 实验证实长直墙退化场景下 NDT 会把 0.7~0.9m 的相邻段"滑"出
+        /// 0.19m 假重叠（chamfer/分数/多分辨率一致全都判别不了），中程纠偏
+        /// 会把相邻段焊死。回环只确认"本就重合"的闭环；中程漂移交由前端治理。
+        LOG(INFO) << "lc reject(assoc-band) " << c.idx1_ << "->" << c.idx2_
+                  << ", pre_overlap " << pre_overlap
+                  << (pre_overlap > options_.loop_assoc_max_dist_ ? " (far)" : " (mid)");
+        c.ndt_score_ = 0.0;
+        return;
+    }
+    /// 门控未启用时走原 NDT 流程。注意：曾存在的"后验门"(post chamfer 校验)
+    /// 已随 lock-or-reject 语义移除——当前配置下 NDT 级联不可达；未来若为
+    /// 富结构场景(柱/桁架厂棚)重新开放"中间带纠偏"，必须连同 pre/post 重叠
+    /// 校验一起恢复（fix2 教训：无校验的中间带会焊死相邻段）。
+
     if (debug_visualization_) {
-        PointCloudType source_world_initial;
-        pcl::transformPointCloud(*submap_kf2, source_world_initial, Tw2);
         debug_visualization_->publishCloud(
-            "backend/ndt/source", source_world_initial, world_frame_id_,
+            "backend/ndt/source", *src_init_world, world_frame_id_,
             kf2->GetState().timestamp_, kf2->GetID(), true);
         debug_visualization_->publishCloud(
             "backend/ndt/target", *submap_kf1, world_frame_id_,
             kf2->GetState().timestamp_, kf2->GetID(), true);
     }
     if (capture_event) {
-        PointCloudType source_world_initial;
-        pcl::transformPointCloud(*submap_kf2, source_world_initial, Tw2);
         data_capture_->saveBackendCloud(event, "source_body", *submap_kf2, imu_frame_id_);
-        data_capture_->saveBackendCloud(event, "source_world_initial", source_world_initial, world_frame_id_);
+        data_capture_->saveBackendCloud(event, "source_world_initial", *src_init_world,
+                                        world_frame_id_);
         data_capture_->saveBackendCloud(event, "target_submap_world", *submap_kf1, world_frame_id_);
         data_capture_->appendBackendRow(
             event, "submap.csv",

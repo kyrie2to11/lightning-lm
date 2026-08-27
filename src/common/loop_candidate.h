@@ -21,6 +21,10 @@ struct LoopCandidate {
     SE3 Tij_;
 
     double ndt_score_ = 0.0;
+
+    /// 关联门控的显式结论，避免用 ndt_score_ 哨兵值编码三态协议：
+    /// false=走常规 NDT 分数过滤；true=强一致带直接采信（免分数过滤）。
+    bool assoc_lock_trusted_ = false;
 };
 
 }  // namespace lightning
