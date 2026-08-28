@@ -119,7 +119,6 @@ class PangolinWindowImpl {
     bool UpdateOptimizedPgo();
     bool UpdateCurrentScan();
 
-    void RenderLabels();
 
    private:
     /// 窗口layout相关
@@ -137,13 +136,12 @@ class PangolinWindowImpl {
     const std::string dis_imgs_name = "Images";
 
     bool following_loc_ = true;       // 相机是否追踪定位结果
-    bool draw_frontend_traj_ = true;  // 可视化前端轨迹
-    bool draw_backend_traj_ = true;   // 可视化后端轨迹
+    bool draw_frontend_traj_ = true;  // 可视化前端轨迹(红:ESKF最新 + 绿:扫描时刻)
+    bool draw_backend_traj_ = true;   // 可视化后端权威轨迹(紫:PGO 后关键帧全集)
+    bool draw_pgo_history_ = false;   // 调试:PGO 优化事件快照串(黄),默认关
     PangolinWindow::Mode mode_ = PangolinWindow::Mode::MAPPING;
 
     // text
-    pangolin::GlText gltext_label_global_;
-    pangolin::GlText gltext_label_state_;
 
     // camera
     pangolin::OpenGlRenderState s_cam_main_;

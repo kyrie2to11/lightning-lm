@@ -205,18 +205,7 @@ bool PangolinWindowImpl::UpdateState() {
     newest_frontend_pose_ = pose_;
     traj_newest_state_->AddPt(newest_frontend_pose_);
 
-    std::ostringstream ss;
-    ss << std::fixed << std::setprecision(4)
-       << "pos: [" << pos(0) << ", " << pos(1) << ", " << pos(2) << "]\n"
-       << std::setprecision(3)
-       << "rpy: [" << roll << ", " << pitch << ", " << yaw << "]\n"
-       << "vel(base): [" << vel_baselink(0) << ", " << vel_baselink(1) << ", "
-       << vel_baselink(2) << "]\n"
-       << std::setprecision(4)
-       << "ba: [" << bias_acc_(0) << ", " << bias_acc_(1) << ", " << bias_acc_(2)
-       << "]\n"
-       << std::setprecision(3) << "conf: " << confidence_;
-    gltext_label_state_ = pangolin::default_font().Text(ss.str());
+    // ba/vel/baselink_vel 等状态曲线在右侧 Plotter 面板已有,顶部不再重复。
 
     kf_result_need_update_.store(false);
     return false;
@@ -257,7 +246,7 @@ void PangolinWindowImpl::DrawAll() {
     GLint previous_depth_func = GL_LESS;
     glGetIntegerv(GL_DEPTH_FUNC, &previous_depth_func);
     glDepthFunc(GL_LEQUAL);
-    if (draw_backend_traj_) {
+    if (draw_pgo_history_) {
         traj_optimized_pgo_->Render();
     }
     if (draw_frontend_traj_) {
@@ -265,12 +254,12 @@ void PangolinWindowImpl::DrawAll() {
         frontend_car_.SetPose(newest_frontend_pose_);
         frontend_car_.Render();
     }
-    if (draw_backend_traj_) {
+    if (draw_frontend_traj_) {
         traj_scans_->Render();
-        if (has_backend_pose_) {
-            backend_car_.SetPose(newest_backend_pose_);
-            backend_car_.Render();
-        }
+    }
+    if (draw_backend_traj_ && has_backend_pose_) {
+        backend_car_.SetPose(newest_backend_pose_);
+        backend_car_.Render();
     }
     glDepthFunc(previous_depth_func);
 
@@ -281,8 +270,9 @@ void PangolinWindowImpl::DrawAll() {
     {
         UL lock(mtx_current_scan_);
 
-        if (all_keyframes_.size() > 1) {
-            /// 闭环后的轨迹
+        /// 闭环后的轨迹(PGO 优化位姿连线)。与黄色后端轨迹同数据源,
+        /// 归入同一个后端开关,避免出现无法关闭的第三条轨迹。
+        if (draw_backend_traj_ && all_keyframes_.size() > 1) {
             glLineWidth(5.0);
             glBegin(GL_LINE_STRIP);
             glColor3f(0.5, 0.0, 0.5);
@@ -300,7 +290,6 @@ void PangolinWindowImpl::DrawAll() {
     }
 
     // 文字
-    RenderLabels();
 }
 
 void PangolinWindowImpl::RenderClouds() {
@@ -316,40 +305,6 @@ void PangolinWindowImpl::RenderClouds() {
     // 绘制
     pangolin::Display(dis_3d_main_name_).Activate(s_cam_main_);
     DrawAll();
-}
-
-void PangolinWindowImpl::RenderLabels() {
-    // 定位状态标识，显示在3D窗口中
-    auto &d_cam3d_main = pangolin::Display(dis_3d_main_name_);
-    d_cam3d_main.Activate(s_cam_main_);
-    const auto cur_width = d_cam3d_main.v.w;
-    const auto cur_height = d_cam3d_main.v.h;
-
-    GLint view[4];
-    glGetIntegerv(GL_VIEWPORT, view);
-
-    glMatrixMode(GL_PROJECTION);
-    glPushMatrix();
-    glLoadIdentity();
-    glOrtho(0, cur_width, 0, cur_height, -1, 1);
-
-    glMatrixMode(GL_MODELVIEW);
-    glPushMatrix();
-    glLoadIdentity();
-
-    glTranslatef(5, cur_height - 1.5 * gltext_label_global_.Height(), 1.0);
-    glColor3ub(127, 127, 127);
-    gltext_label_global_.Draw();
-
-    glTranslatef(0.0f, -1.5f * gltext_label_global_.Height(), 0.0f);
-    glColor3ub(180, 220, 180);
-    gltext_label_state_.Draw();
-
-    // Restore modelview / project matrices
-    glMatrixMode(GL_PROJECTION);
-    glPopMatrix();
-    glMatrixMode(GL_MODELVIEW);
-    glPopMatrix();
 }
 
 void PangolinWindowImpl::CreateDisplayLayout() {
@@ -413,8 +368,9 @@ void PangolinWindowImpl::Render() {
     // menu
     pangolin::CreatePanel("menu").SetBounds(0.0, 1.0, 0.0, pangolin::Attach::Pix(menu_width_));
     pangolin::Var<bool> menu_follow_loc("menu.Follow", false, true);                     // 跟踪实时定位
-    pangolin::Var<bool> menu_draw_frontend_traj("menu.Draw Frontend Traj", true, true);  // 前端实时轨迹
-    pangolin::Var<bool> menu_draw_backend_traj("menu.Draw Backend Traj", true, true);    // 后端实时轨迹
+    pangolin::Var<bool> menu_draw_frontend_traj("menu.Draw Frontend Traj", true, true);  // 前端输出:递推轨迹族
+    pangolin::Var<bool> menu_draw_backend_traj("menu.Draw Backend Traj", true, true);    // 后端输出:权威最终轨迹
+    pangolin::Var<bool> menu_draw_pgo_history("menu.Draw PGO History", false, false); // 调试:PGO 事件快照串
     pangolin::Var<bool> menu_reset_3d_view("menu.Reset 3D View", false, false);          // 重置俯视视角
     pangolin::Var<bool> menu_reset_front_view("menu.Set to front View", false, false);   // 前视视角
     pangolin::Var<bool> menu_step("menu.Step", false, false);                            // 单步调试
@@ -436,6 +392,7 @@ void PangolinWindowImpl::Render() {
         following_loc_ = menu_follow_loc;
         draw_frontend_traj_ = menu_draw_frontend_traj;
         draw_backend_traj_ = menu_draw_backend_traj;
+        draw_pgo_history_ = menu_draw_pgo_history;
 
         if (menu_reset_3d_view) {
             s_cam_main_.SetModelViewMatrix(pangolin::ModelViewLookAt(0, 0, 1000, 0, 0, 0, pangolin::AxisY));
@@ -482,10 +439,6 @@ void PangolinWindowImpl::Render() {
 std::string PangolinWindowImpl::GetWindowName() const { return win_name_; }
 
 void PangolinWindowImpl::AllocateBuffer() {
-    std::string global_text("Red: newest IMU pose, yellow: lidar scan pose");
-    auto &font = pangolin::default_font();
-    gltext_label_global_ = font.Text(global_text);
-    gltext_label_state_ = font.Text("pos: [0.000, 0.000, 0.000]");
 }
 
 void PangolinWindowImpl::ReleaseBuffer() {}
