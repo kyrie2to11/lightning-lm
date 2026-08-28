@@ -206,8 +206,16 @@ bool PangolinWindowImpl::UpdateState() {
     traj_newest_state_->AddPt(newest_frontend_pose_);
 
     std::ostringstream ss;
-    ss << std::fixed << std::setprecision(4) << "ba: [" << bias_acc_(0) << ", " << bias_acc_(1) << ", " << bias_acc_(2)
-       << "]";
+    ss << std::fixed << std::setprecision(4)
+       << "pos: [" << pos(0) << ", " << pos(1) << ", " << pos(2) << "]\n"
+       << std::setprecision(3)
+       << "rpy: [" << roll << ", " << pitch << ", " << yaw << "]\n"
+       << "vel(base): [" << vel_baselink(0) << ", " << vel_baselink(1) << ", "
+       << vel_baselink(2) << "]\n"
+       << std::setprecision(4)
+       << "ba: [" << bias_acc_(0) << ", " << bias_acc_(1) << ", " << bias_acc_(2)
+       << "]\n"
+       << std::setprecision(3) << "conf: " << confidence_;
     gltext_label_state_ = pangolin::default_font().Text(ss.str());
 
     kf_result_need_update_.store(false);
@@ -474,13 +482,10 @@ void PangolinWindowImpl::Render() {
 std::string PangolinWindowImpl::GetWindowName() const { return win_name_; }
 
 void PangolinWindowImpl::AllocateBuffer() {
-    std::string global_text(
-        "Welcome to SAD.UI. Open source code: https://github.com/gaoxiang12/slam_in_autonomous_driving. All right "
-        "reserved.\n"
-        "Red: newest IMU pose, yellow: lidar scan pose");
+    std::string global_text("Red: newest IMU pose, yellow: lidar scan pose");
     auto &font = pangolin::default_font();
     gltext_label_global_ = font.Text(global_text);
-    gltext_label_state_ = font.Text("ba: [0.0000, 0.0000, 0.0000]");
+    gltext_label_state_ = font.Text("pos: [0.000, 0.000, 0.000]");
 }
 
 void PangolinWindowImpl::ReleaseBuffer() {}
