@@ -24,6 +24,9 @@ fasterlio:
   ivox_nearby_type: 18
   esti_plane_threshold: 0.1
 
+  # ESKF 退化方向治理(沿墙慢漂):西墙长直段沿墙方向信息弱,阈值上调使
+  # 沿墙方向被判退化(不更新、保先验+协方差膨胀),抑制低频漫步。
+
   use_aa: false
 
   acc_cov: 0.1

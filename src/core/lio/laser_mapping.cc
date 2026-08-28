@@ -94,6 +94,16 @@ bool LaserMapping::Init(const std::string &config_yaml) {
         CaptureEskfIteration(info);
     };
     eskf_options.use_aa_ = use_aa_;
+    // 退化方向治理(沿墙慢漂):阈值/膨胀由 yaml 可调,缺省回落代码默认值。
+    const auto eskf_yaml = YAML::LoadFile(config_yaml);
+    if (eskf_yaml["fasterlio"]["degeneracy_threshold_ratio"]) {
+        eskf_options.degeneracy_threshold_ratio_ =
+            eskf_yaml["fasterlio"]["degeneracy_threshold_ratio"].as<double>();
+    }
+    if (eskf_yaml["fasterlio"]["degeneracy_cov_inflation"]) {
+        eskf_options.degeneracy_cov_inflation_ =
+            eskf_yaml["fasterlio"]["degeneracy_cov_inflation"].as<double>();
+    }
     kf_.Init(eskf_options);
 
     return true;
